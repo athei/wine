@@ -65,6 +65,7 @@ static void run_cocoa_app(void* info)
     struct cocoa_app_startup_info* startup_info = info;
     NSConditionLock* lock = startup_info->lock;
     BOOL created_app = FALSE;
+    BOOL success = FALSE;
 
     @autoreleasepool
     {
@@ -87,6 +88,10 @@ static void run_cocoa_app(void* info)
             startup_info->success = TRUE;
         }
 
+        /* Save success to a local before unlocking — startup_info points to
+           the caller's stack frame which may be destroyed once we unlock. */
+        success = startup_info->success;
+
         /* Retain the lock while we're using it, so macdrv_start_cocoa_app()
            doesn't deallocate it in the middle of us unlocking it. */
         [lock retain];
@@ -95,7 +100,7 @@ static void run_cocoa_app(void* info)
         [lock release];
     }
 
-    if (created_app && startup_info->success)
+    if (created_app && success)
     {
         @autoreleasepool
         {
