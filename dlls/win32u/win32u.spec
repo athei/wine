@@ -1439,7 +1439,7 @@
 @ stub -syscall NtUserSetWindowCompositionTransition
 @ stdcall -syscall NtUserSetWindowContextHelpId(long long)
 @ stub -syscall NtUserSetWindowDisplayAffinity
-@ stub -syscall NtUserSetWindowFNID
+@ stdcall -syscall NtUserSetWindowFNID(long long)
 @ stub -syscall NtUserSetWindowFeedbackSetting
 @ stub -syscall NtUserSetWindowGroup
 @ stdcall -syscall NtUserSetWindowLong(long long long long)
@@ -1540,3 +1540,8 @@
 @ stub -syscall NtValidateCompositionSurfaceHandle
 @ stub -syscall NtVisualCaptureBits
 # extern gDispatchTableValues
+
+# shutil
+# CW Hack 22310
+@ stdcall -syscall __wine_get_current_process_explicit_app_user_model_id(ptr long)
+@ stdcall -syscall __wine_set_current_process_explicit_app_user_model_id(wstr)

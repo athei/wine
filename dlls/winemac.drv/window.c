@@ -46,6 +46,31 @@ static CFMutableDictionaryRef win_datas;
 static unsigned int activate_on_focus_time;
 
 
+/* CrossOver Hack #16933 */
+static BOOL is_main_quicken_window(HWND hwnd)
+{
+    static const WCHAR qw_exeW[] = {'q','w','.','e','x','e',0};
+    static const WCHAR qframeW[] = {'Q','F','R','A','M','E',0};
+    static int is_qw_exe = -1;
+    WCHAR class[32];
+    UNICODE_STRING name = { .Buffer = class, .MaximumLength = sizeof(class) };
+
+    if (is_qw_exe == -1)
+    {
+        WCHAR *name = NtCurrentTeb()->Peb->ProcessParameters->ImagePathName.Buffer;
+        WCHAR *module_exe = wcsrchr(name, '\\');
+        module_exe = module_exe ? module_exe + 1 : name;
+
+        is_qw_exe = !wcsicmp(module_exe, qw_exeW);
+    }
+
+    if (!is_qw_exe || !NtUserGetClassName(hwnd, FALSE, &name))
+        return FALSE;
+
+    return !wcscmp(class, qframeW);
+}
+
+
 /* per-monitor DPI aware NtUserSetWindowPos call */
 static BOOL set_window_pos(HWND hwnd, HWND after, INT x, INT y, INT cx, INT cy, UINT flags)
 {
@@ -94,6 +119,13 @@ static struct macdrv_window_features get_cocoa_window_features(struct macdrv_win
 
     if (ex_style & WS_EX_NOACTIVATE) wf.prevents_app_activation = TRUE;
     if (EqualRect(&data->rects.window, &data->rects.visible)) return wf;
+
+    /* CrossOver Hack #16933 */
+    if (is_main_quicken_window(data->hwnd))
+    {
+        wf.resizable = TRUE;
+        return wf;
+    }
 
     return get_window_features_for_style(style, ex_style, data->shaped);
 }
@@ -797,8 +829,46 @@ static void set_app_icon(void)
     CFArrayRef images = create_app_icon_images();
     if (images)
     {
-        macdrv_set_application_icon(images);
+        macdrv_set_application_icon(images, NULL);
         CFRelease(images);
+    }
+    else /* CrossOver Hack 13440: Find an icon from the CrossOver app bundle */
+    {
+        const char *cx_root;
+        if ((cx_root = getenv("CX_ROOT")) && cx_root[0])
+        {
+            CFURLRef url, temp;
+            url = CFURLCreateFromFileSystemRepresentation(NULL, (UInt8*)cx_root, strlen(cx_root), TRUE);
+            if (url)
+            {
+                temp = CFURLCreateCopyDeletingLastPathComponent(NULL, url);
+                CFRelease(url);
+                url = temp;
+            }
+            if (url)
+            {
+                temp = CFURLCreateCopyDeletingLastPathComponent(NULL, url);
+                CFRelease(url);
+                url = temp;
+            }
+            if (url)
+            {
+                temp = CFURLCreateCopyAppendingPathComponent(NULL, url, CFSTR("Resources"), TRUE);
+                CFRelease(url);
+                url = temp;
+            }
+            if (url)
+            {
+                temp = CFURLCreateCopyAppendingPathComponent(NULL, url, CFSTR("exeIcon.icns"), FALSE);
+                CFRelease(url);
+                url = temp;
+            }
+            if (url)
+            {
+                macdrv_set_application_icon(NULL, url);
+                CFRelease(url);
+            }
+        }
     }
 }
 
@@ -1206,6 +1276,20 @@ void macdrv_SetDesktopWindow(HWND hwnd)
         SERVER_END_REQ;
     }
 
+    /* CW Hack #26536 */
+    {
+        static const WCHAR helldivers2_exeW[] = {'\\','h','e','l','l','d','i','v','e','r','s','2','.','e','x','e',0};
+        WCHAR *path = NtCurrentTeb()->Peb->ProcessParameters->ImagePathName.Buffer;
+        size_t suffix_len = ARRAY_SIZE(helldivers2_exeW) - 1, path_len = wcslen(path);
+        if (path_len > suffix_len && !wcsicmp(path + path_len - suffix_len, helldivers2_exeW))
+        {
+            static pthread_once_t app_icon_once = PTHREAD_ONCE_INIT;
+            ERR("HACK: only doing set_app_icon once for Helldivers 2\n");
+            pthread_once(&app_icon_once, set_app_icon);
+            return;
+        }
+    }
+
     set_app_icon();
 }
 
@@ -1248,6 +1332,9 @@ void macdrv_DestroyWindow(HWND hwnd)
     if (data->drag_event) NtSetEvent(data->drag_event, NULL);
 
     destroy_cocoa_window(data);
+
+    /* CW HACK 22435 */
+    if (data->d3dmetal_client_surfaces) CFRelease(data->d3dmetal_client_surfaces);
 
     CFDictionaryRemoveValue(win_datas, hwnd);
     release_win_data(data);
@@ -1563,6 +1650,9 @@ BOOL macdrv_WindowPosChanging(HWND hwnd, UINT swp_flags, BOOL shaped, const stru
 BOOL macdrv_GetWindowStyleMasks(HWND hwnd, UINT style, UINT ex_style, UINT *style_mask, UINT *ex_style_mask)
 {
     struct macdrv_window_features wf = get_window_features_for_style(style, ex_style, FALSE);
+
+    /* CW HACK 16933: No Cocoa window decorations for the Quicken main window. */
+    if (is_main_quicken_window(hwnd)) return FALSE;
 
     *style_mask = ex_style = 0;
     if (wf.title_bar)

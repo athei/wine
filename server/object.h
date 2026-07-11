@@ -274,6 +274,7 @@ extern void generate_startup_debug_events( struct process *process );
 extern unsigned int supported_machines_count;
 extern unsigned short supported_machines[8];
 extern unsigned short native_machine;
+extern int wow64_using_32bit_prefix;
 extern void init_registry(void);
 extern void flush_registry(void);
 

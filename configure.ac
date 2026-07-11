@@ -374,7 +374,10 @@ AS_VAR_SET_IF([enable_archs],
      for arch
      do
          case $arch in
-           i386|x86_64|arm|aarch64|arm64ec) cross_archs="$cross_archs $arch" ;;
+           i386|x86_64|arm|aarch64|arm64ec)
+             cross_archs="$cross_archs $arch"
+             test $HOST_ARCH = $arch || CFLAGS="$CFLAGS -DIS_WOW64_BUILD"
+             ;;
            no|none) PE_ARCHS=none ;;
            *) AC_MSG_ERROR([Unknown cross-compilation architecture '$arch']) ;;
          esac
@@ -666,6 +669,7 @@ m4_ifdef([AC_SYS_YEAR2038],
 
 AC_CHECK_HEADERS(\
 	CL/cl.h \
+	IOKit/usb/IOUSBLib.h \
 	OpenCL/opencl.h \
 	arpa/inet.h \
 	arpa/nameser.h \
@@ -714,6 +718,7 @@ AC_CHECK_HEADERS(\
 	sys/cdio.h \
 	sys/epoll.h \
 	sys/event.h \
+	sys/eventfd.h \
 	sys/extattr.h \
 	sys/filio.h \
 	sys/ipc.h \
@@ -936,6 +941,9 @@ case $host_os in
     AC_SUBST(APPKIT_LIBS,"-framework AppKit")
     AC_SUBST(SECURITY_LIBS,"-framework Security -framework CoreFoundation")
     AC_SUBST(SYSTEMCONFIGURATION_LIBS,"-framework SystemConfiguration")
+    AC_LANG_PUSH([Objective C])
+        AC_CHECK_HEADERS(AVFoundation/AVFoundation.h)
+    AC_LANG_POP([Objective C])
 
     WINELOADER_LDFLAGS="-Wl,-segalign,0x1000,-pagezero_size,0x1000,-sectcreate,__TEXT,__info_plist,loader/wine_info.plist"
 
@@ -970,6 +978,7 @@ case $host_os in
 
     if test "x$with_coreaudio" != "xno";
     then
+        AC_SUBST(AVFOUNDATION_LIBS,"-framework AVFoundation")
         AC_SUBST(COREAUDIO_LIBS,"-framework CoreFoundation -framework CoreAudio -framework AudioUnit -framework AudioToolbox -framework CoreMIDI")
         enable_winecoreaudio_drv=${enable_winecoreaudio_drv:-yes}
     fi
@@ -977,6 +986,13 @@ case $host_os in
     then
         AC_SUBST(OPENCL_LIBS,"-framework OpenCL")
         ac_cv_lib_OpenCL_clGetPlatformInfo=yes
+    fi
+    if test "$ac_cv_header_IOKit_usb_IOUSBLib_h" = "yes"
+    then
+        ac_save_LIBS="$LIBS"
+        LIBS="$LIBS $IOKIT_LIBS"
+        AC_CHECK_FUNCS(IOServiceMatching)
+        LIBS="$ac_save_LIBS"
     fi
 
     dnl Check for MTLDevice registryID property
@@ -2128,6 +2144,7 @@ AC_CHECK_FUNCS(\
 	port_create \
 	posix_fadvise \
 	posix_fallocate \
+	ppoll \
 	prctl \
 	process_vm_readv \
 	process_vm_writev \
@@ -2146,6 +2163,12 @@ dnl Check for clock_gettime which may be in -lrt
 ac_save_LIBS=$LIBS
 AC_SEARCH_LIBS(clock_gettime, rt,
                [AC_DEFINE(HAVE_CLOCK_GETTIME, 1, [Define to 1 if you have the 'clock_gettime' function.])
+                test "$ac_res" = "none required" || AC_SUBST(RT_LIBS,"$ac_res")])
+LIBS=$ac_save_LIBS
+
+ac_save_LIBS=$LIBS
+AC_SEARCH_LIBS(shm_open, rt,
+               [AC_DEFINE(HAVE_SHM_OPEN, 1, [Define to 1 if you have the `shm_open' function.])
                 test "$ac_res" = "none required" || AC_SUBST(RT_LIBS,"$ac_res")])
 LIBS=$ac_save_LIBS
 
@@ -3739,18 +3762,6 @@ then
 fonts \
 loader/wine.inf \
 nls \
-programs/msidb/msidb \
-programs/msiexec/msiexec \
-programs/notepad/notepad \
-programs/regedit/regedit \
-programs/regsvr32/regsvr32 \
-programs/wineboot/wineboot \
-programs/winecfg/winecfg \
-programs/wineconsole/wineconsole \
-programs/winedbg/winedbg \
-programs/winefile/winefile \
-programs/winemine/winemine \
-programs/winepath/winepath \
 server/wineserver"
 
     case $host_os in
@@ -3759,6 +3770,18 @@ server/wineserver"
     esac
 fi
 
+dnl Crossover hacks
+
+WINE_APPEND_RULE(
+[install-image: install-lib
+# Get rid of the files we don't want in the image
+	rm -rf \$(DESTDIR)\$(mandir)
+# Rename the wine loader (don't ask)
+	mv \$(DESTDIR)\$(bindir)/wine \$(DESTDIR)\$(bindir)/wineloader])
+
+AC_ARG_WITH(po-dir, AS_HELP_STRING([--with-po-dir=PATH],[use a different directory for PO files]),
+            AC_SUBST(podir,[$withval]))
+
 dnl Rules for generated source files
 
 WINE_APPEND_RULE(
@@ -3766,9 +3789,9 @@ WINE_APPEND_RULE(
 	@version=\`(GIT_DIR=${wine_srcdir}.git git describe HEAD 2>/dev/null || echo \"wine-\$(PACKAGE_VERSION)\") | sed -n -e '\$\$s/\(.*\)/const char wine_build[[]] = \"\\1\";/p'\` && (echo \$\$version | cmp -s - \$[@]) || echo \$\$version >\$[@] || (rm -f \$[@] && exit 1)
 programs/winetest/build.rc: dummy
 	@build=\"STRINGTABLE { 1 \\\"\`GIT_DIR=${wine_srcdir}.git git rev-parse HEAD 2>/dev/null\`\\\" }\" && (echo \$\$build | cmp -s - \$[@]) || echo \$\$build >\$[@] || (rm -f \$[@] && exit 1)
-dlls/wineandroid.drv/wine-debug.apk: dlls/wineandroid.drv/build.gradle ${wine_srcdir}dlls/wineandroid.drv/AndroidManifest.xml ${wine_srcdir}dlls/wineandroid.drv/WineActivity.java ${wine_srcdir}dlls/wineandroid.drv/wine.svg
-	cd dlls/wineandroid.drv && gradle -q -Psrcdir=$srcdir assembleDebug
-	mv dlls/wineandroid.drv/build/outputs/apk/wine-debug.apk \$[@]])
+dlls/wineandroid.drv/wineandroid.drv-debug.aar: dlls/wineandroid.drv/build.gradle ${wine_srcdir}/dlls/wineandroid.drv/AndroidManifest.xml ${wine_srcdir}/dlls/wineandroid.drv/WineDriver.java ${wine_srcdir}/dlls/wineandroid.drv/WineProvider.java ${wine_srcdir}/dlls/wineandroid.drv/wine.svg ${wine_srcdir}/dlls/wineandroid.drv/strings.xml
+	cd dlls/wineandroid.drv && \`cd ../.. && cd $srcdir && pwd\`/gradlew -q -Psrcdir=$srcdir assembleDebug
+	mv dlls/wineandroid.drv/build/outputs/aar/wineandroid.drv-debug.aar \$[@]])
 
 dnl Misc rules
 

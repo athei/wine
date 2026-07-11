@@ -45,6 +45,9 @@ extern BOOL allow_software_rendering;
 
 extern UINT64 app_icon_callback;
 extern UINT64 app_quit_request_callback;
+extern UINT64 regcreateopenkeyexa_callback;
+extern UINT64 regqueryvalueexa_callback;
+extern UINT64 regsetvalueexa_callback;
 
 extern const char* debugstr_cf(CFTypeRef t);
 
@@ -134,6 +137,8 @@ extern LRESULT macdrv_NotifyIcon(HWND hwnd, UINT msg, NOTIFYICONDATAW *data);
 extern void macdrv_CleanupIcons(HWND hwnd);
 extern LRESULT macdrv_DesktopWindowProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam);
 extern void macdrv_DestroyWindow(HWND hwnd);
+extern NTSTATUS macdrv_SetCurrentProcessExplicitAppUserModelID(LPCWSTR aumid);  /* CW Hack 22310 */
+extern NTSTATUS macdrv_GetCurrentProcessExplicitAppUserModelID(LPWSTR buffer, INT size);  /* CW Hack 22310 */
 extern void macdrv_SetDesktopWindow(HWND hwnd);
 extern void macdrv_ActivateWindow(HWND hwnd, HWND previous);
 extern void macdrv_SetLayeredWindowAttributes(HWND hwnd, COLORREF key, BYTE alpha,
@@ -189,6 +194,9 @@ struct macdrv_win_data
     unsigned int        per_pixel_alpha : 1;    /* is window using per-pixel alpha? */
     unsigned int        minimized : 1;          /* is window minimized? */
     unsigned int        fullscreen : 1;         /* is the window visible rect fullscreen? (unrelated to native AppKit/Cocoa fullscreen) */
+
+    /* CW HACK 22435 */
+    CFMutableArrayRef   d3dmetal_client_surfaces;
 };
 
 struct macdrv_client_surface
@@ -243,6 +251,8 @@ extern void macdrv_release_capture(HWND hwnd, const macdrv_event *event);
 extern void macdrv_SetCapture(HWND hwnd, UINT flags);
 
 extern void macdrv_compute_keyboard_layout(struct macdrv_thread_data *thread_data);
+/* CrossOver Hack 10912: Mac Edit menu */
+extern void macdrv_edit_menu_command(const macdrv_event *event);
 extern void macdrv_keyboard_changed(const macdrv_event *event);
 extern void macdrv_key_event(HWND hwnd, const macdrv_event *event);
 extern void macdrv_hotkey_press(const macdrv_event *event);

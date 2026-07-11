@@ -442,6 +442,27 @@ static BOOL is_window_managed( HWND hwnd, UINT swp_flags, BOOL fullscreen )
 
     if (!managed_mode) return FALSE;
 
+    /*
+     * CODEWEAVERS HACK
+     * Hack needed to have the mabinogi window not resized incorrectly
+     * by the x11 window manager.
+     */
+    if (1)
+    {
+        static const WCHAR launcherW[] = {'d','e','v','c','a','t','_','l','a','u','n','c','h','e','r',0};
+        static const WCHAR netuiW[] = {'N','e','t',' ','U','I',' ','T','o','o','l',' ','W','i','n','d','o','w',0};
+        WCHAR class[80];
+        UNICODE_STRING name = { .Buffer = class, .MaximumLength = sizeof(class) };
+        NtUserGetClassName( hwnd, FALSE, &name );
+
+        if (wcscmp(class,launcherW) == 0)
+            return FALSE;
+
+        /* Office 2010 right-click menus, hack for bug 15617. */
+        if (wcscmp(class, netuiW) == 0)
+            return FALSE;
+    }
+
     /* child windows are not managed */
     style = NtUserGetWindowLongW( hwnd, GWL_STYLE );
     if ((style & (WS_CHILD|WS_POPUP)) == WS_CHILD) return FALSE;
@@ -452,6 +473,111 @@ static BOOL is_window_managed( HWND hwnd, UINT swp_flags, BOOL fullscreen )
     if ((style & WS_CAPTION) == WS_CAPTION) return TRUE;
     /* windows with thick frame are managed */
     if (style & WS_THICKFRAME) return TRUE;
+
+    /*
+     * CODEWEAVERS HACKS
+     */
+    if (1)
+    {
+        static const WCHAR menuW[] = {'#','3','2','7','7','0',0};
+        static const WCHAR splashW[] = {'S','p','l','a','s','h','W','n','d',0};
+        static const WCHAR itunesW[] = {'i','T','u','n','e','s',0};
+        static const WCHAR qtplayermainW[] = {'Q','u','i','c','k','T','i','m','e','P','l','a','y','e','r','M','a','i','n',0};
+        static const WCHAR qtplayerW[] = {'Q','u','i','c','k','T','i','m','e','P','l','a','y','e','r','.','e','x','e',0};
+        static const WCHAR psfloatW[] = {'P','S','F','l','o','a','t','C',0};
+        static const WCHAR msosplashW[] = {'M','s','o','S','p','l','a','s','h',0};
+        static const WCHAR ieframeW[] = {'I','E','F','r','a','m','e',0};
+        static const WCHAR tfrmsplashW[] = {'T','f','r','m','S','p','l','a','s','h',0};
+        static const WCHAR ebusetupW[] = {'E','B','U','S','e','t','u','p','W','n','d',0};
+        static const WCHAR wtllineW[] = {'W','T','L','_','L','i','n','e','S','t','y','l','e','C','o','l','o','r','D','D',0};
+        static const WCHAR wtlpatternW[] = {'W','T','L','_','P','a','t','t','e','r','n','C','o','l','o','r','D','D',0};
+        static const WCHAR dlgcacW[] = {'D','l','g','c','a','c','C','l','s','N','a','m','e',0};
+        static const WCHAR popupW[] = {'p','o','p','u','p','s','h','a','d','o','w',0};
+        static const WCHAR relistboxW[] = {'R','E','L','i','s','t','B','o','x','2','0','W',0};
+        static const WCHAR nuidialogW[] = {'N','U','I','D','i','a','l','o','g',0};
+        static const WCHAR sessionW[] = {'S','e','s','s','i','o','n','C','h','a','t','R','o','o','m','D','e','t','a','i','l','W','n','d',0};
+        WCHAR *p, class[80];
+        UNICODE_STRING name = { .Buffer = class, .MaximumLength = sizeof(class) };
+        NtUserGetClassName( hwnd, FALSE, &name );
+
+        ex_style = NtUserGetWindowLongW( hwnd, GWL_EXSTYLE );
+        /*
+         * In Scientific Word, the startup dialog should be managed.
+         * In SAP Netweaver, the tooltips should not (WS_EX_TOPMOST).
+         */
+        if ( (wcscmp(class,menuW)==0) &&
+            !(ex_style & WS_EX_TOPMOST) )
+            return TRUE;
+        if (wcscmp(class,splashW)==0)
+            return TRUE;
+        if (wcscmp(class,itunesW)==0)
+            return TRUE;
+        if (wcscmp(class,qtplayermainW) == 0)
+            return TRUE; /* QuickTime 7.1 */
+        if ((p = wcsrchr(class, '\\')) && wcscmp(p+1,qtplayerW) == 0)
+            return TRUE; /* QuickTime 6.x */
+        if (wcscmp(class,psfloatW)==0)
+            return TRUE;
+        /* the office 97 splash screen is not a toolbar */
+        if (wcscmp(class,msosplashW) == 0)
+            return TRUE;
+        if ((wcscmp(class,ieframeW) == 0) && (style & WS_SYSMENU))
+            return TRUE;
+        /* for CRPSClient for WorldVistA */
+        if (wcscmp(class,tfrmsplashW) == 0)
+            return TRUE;
+        /* Halo setup window */
+        if (wcscmp(class,ebusetupW) == 0)
+            return TRUE;
+        /* AWR line style popup */
+        if (wcscmp(class,wtllineW) == 0)
+            return TRUE;
+        /* AWR fill style popup */
+        if (wcscmp(class,wtlpatternW) == 0)
+            return TRUE;
+        /* Quickbooks InstallShield window */
+        if (wcscmp(class,dlgcacW) == 0)
+            return TRUE;
+        /* WeChat popup shadow, bug 18028 */
+        if (wcscmp(class,popupW) == 0)
+        {
+            WCHAR parent_class[80];
+            UNICODE_STRING parent_name = { .Buffer = parent_class, .MaximumLength = sizeof(parent_class) };
+
+            /* Bug 21523 WeChat chat room detail window doesn't show. */
+            NtUserGetClassName( NtUserGetParent( hwnd ), FALSE, &parent_name );
+            if (wcscmp( parent_class, sessionW ) == 0)
+                return FALSE;
+
+            return TRUE;
+        }
+
+#ifdef __APPLE__
+        {
+            static const WCHAR eveW[] = {'e','v','e','S','p','l','a','t','t','e','r',0};
+            static const WCHAR triuiW[] = {'t','r','i','u','i','S','c','r','e','e','n',0};
+        /* Macos does not like those windows to be managed, but Linux needs that(handled below in the
+         * POPUP | SYSMENU case
+         */
+        /* EVE online - Does not redraw otherwise*/
+        if(wcscmp(class, eveW) == 0 || wcscmp(class, triuiW) == 0)
+            return FALSE;
+        }
+#endif
+
+        /* for outlook 2003 completion window */
+        if (wcscmp(class,relistboxW) == 0 && (style & WS_POPUP) &&
+            (style & WS_SYSMENU))
+            return FALSE;
+
+        /* Outlook 2003 "Toast" window that appears when a new message is
+         * received. Should not be managed to prevent it grabbing keyboard
+         * focus */
+        if (wcscmp(class,nuidialogW) == 0 &&
+            (style & (WS_POPUP|WS_SYSMENU)) == (WS_POPUP|WS_SYSMENU))
+            return FALSE;
+    }
+
     if (style & WS_POPUP)
     {
         /* popup with sysmenu == caption are managed */
@@ -1231,6 +1357,10 @@ static void set_wm_hints( struct x11drv_win_data *data )
         ex_style = NtUserGetWindowLongW( data->hwnd, GWL_EXSTYLE );
     }
 
+    /* HACK for bug 13477. */
+    if (style & WS_MINIMIZE)
+        style |= WS_MINIMIZEBOX;
+
     set_size_hints( data, style );
     set_mwm_hints( data, style, ex_style );
     set_style_hints( data, style, ex_style );
@@ -1478,6 +1608,7 @@ static void update_net_wm_states( struct x11drv_win_data *data )
     static const UINT fullscreen_mask = (1 << NET_WM_STATE_MAXIMIZED) | (1 << NET_WM_STATE_FULLSCREEN);
     UINT style, ex_style, new_state = 0;
 
+    if (!data->managed) return; /* CW HACK: 25559 */
     if (data->embedded) return;
     if (data->whole_window == root_window)
     {

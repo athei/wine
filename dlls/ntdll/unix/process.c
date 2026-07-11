@@ -40,6 +40,10 @@
 #endif
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <stdint.h>
+#ifdef HAVE_SYS_UN_H
+# include <sys/un.h>
+#endif
 #ifdef HAVE_SYS_SYSCTL_H
 # include <sys/sysctl.h>
 #endif
@@ -59,6 +63,12 @@
 #ifdef HAVE_MACH_MACH_H
 # include <mach/mach.h>
 #endif
+#ifdef __APPLE__
+#include <crt_externs.h>
+#define environ (*_NSGetEnviron())
+#else
+extern char **environ;
+#endif
 
 #include "ntstatus.h"
 #define WIN32_NO_STATUS
@@ -77,6 +87,436 @@ WINE_DEFAULT_DEBUG_CHANNEL(process);
 static ULONG execute_flags = MEM_EXECUTE_OPTION_DISABLE;
 
 static UINT process_error_mode;
+
+/* CrossOver Hack 10523: shunt the loading to CrossOver */
+enum { /* must match definitions in Mac app code (WineLoader.m) */
+    REQUEST_LOAD_WINE = 0x52c17355,
+    RESPONSE_SUCCESS,
+};
+
+static BOOL write_data(int sock, const void *buffer, size_t length)
+{
+    const char* p = buffer;
+    while (length)
+    {
+        ssize_t rc = write(sock, p, length);
+        if (rc > 0)
+        {
+            p += rc;
+            length -= rc;
+        }
+        else if (errno != EINTR)
+        {
+            WARN("failed to write data; errno %d\n", errno);
+            return FALSE;
+        }
+    }
+
+    return TRUE;
+}
+
+static BOOL write_length_prefixed_buffer(int sock, const void *buffer, uint64_t length)
+{
+    if (!write_data(sock, &length, sizeof(length)))
+        return FALSE;
+
+    if (!write_data(sock, buffer, length))
+        return FALSE;
+
+    return TRUE;
+}
+
+static BOOL read_data(int sock, void *buffer, size_t length)
+{
+    char* p = buffer;
+    while (length > 0)
+    {
+        int rc = read(sock, p, length);
+        if (rc > 0)
+        {
+            p += rc;
+            length -= rc;
+        }
+        else if (rc == 0 || errno != EINTR)
+            return FALSE;
+    }
+
+    return TRUE;
+}
+
+static char **build_argv( const UNICODE_STRING *cmdline, int reserved );
+
+static BOOL has_key_value( const WCHAR *exenameW, const WCHAR *keyname, BOOL *exists )
+{
+    KEY_VALUE_BASIC_INFORMATION info;
+    OBJECT_ATTRIBUTES attr;
+    UNICODE_STRING name;
+    HANDLE hkey;
+    DWORD size;
+    NTSTATUS status;
+
+    name.Length = wcslen(keyname) * sizeof(WCHAR);
+    name.Buffer = (WCHAR *)keyname;
+    InitializeObjectAttributes( &attr, &name, OBJ_CASE_INSENSITIVE, 0, 0 );
+    if (NtOpenKey(&hkey, KEY_READ, &attr)) return FALSE;
+    name.Length = wcslen(exenameW) * sizeof(WCHAR);
+    name.Buffer = (WCHAR *)exenameW;
+    status = NtQueryValueKey(hkey, &name, KeyValueBasicInformation, &info, sizeof(info), &size);
+    *exists = (status == STATUS_SUCCESS || status == STATUS_BUFFER_OVERFLOW);
+    NtClose(hkey);
+    return TRUE;
+}
+
+/* Gather specially prefixed PE env vars bound for Unix promotion, convert them
+   from WCHARs, and return them all as a null-separated and -terminated string
+   in promoted_env. promoted_env will be set to NULL and total_length to 0 if
+   there were no variables to promote. The length parameter is set to the length
+   of promoted_env in bytes, including all nulls. */
+static BOOL get_pe_env_var_promotions(const WCHAR *pe_env, char **promoted_env, uint64_t *total_length)
+{
+    static const WCHAR cx_unixW[] = {'_','_','C','X','_','U','N','I','X','_',0};
+    const WCHAR *var = pe_env;
+    char *mb_env, *p;
+    uint64_t max_total_mb_len = 0, total_mb_len = 0;
+
+    while (*var)
+    {
+        DWORD this_len = wcslen(var);
+        if (!wcsncmp(var, cx_unixW, ARRAY_SIZE(cx_unixW) - 1) &&
+            var[ARRAY_SIZE(cx_unixW) - 1] != '\0' &&
+            var[ARRAY_SIZE(cx_unixW) - 1] != '=')
+        {
+            DWORD unprefixed_len = this_len - (ARRAY_SIZE(cx_unixW) - 1);
+            max_total_mb_len += unprefixed_len * 3 + 1;
+        }
+
+        var += this_len + 1;
+    }
+
+    if (max_total_mb_len == 0)
+    {
+        *promoted_env = NULL;
+        *total_length = 0;
+        return TRUE;
+    }
+
+    mb_env = calloc(max_total_mb_len, sizeof(char));
+    if (!mb_env)
+    {
+        WARN("failed to allocate space for promoted PE environment\n");
+        return FALSE;
+    }
+
+    var = pe_env;
+    p = mb_env;
+    while (*var)
+    {
+        DWORD this_len = wcslen(var);
+        if (!wcsncmp(var, cx_unixW, ARRAY_SIZE(cx_unixW) - 1) &&
+            var[ARRAY_SIZE(cx_unixW) - 1] != '\0' &&
+            var[ARRAY_SIZE(cx_unixW) - 1] != '=')
+        {
+            const WCHAR *unprefixed_start = var + ARRAY_SIZE(cx_unixW) - 1;
+            DWORD unprefixed_len = this_len - (ARRAY_SIZE(cx_unixW) - 1);
+            DWORD this_max_mb_len = unprefixed_len * 3 + 1;
+            DWORD this_mb_len = ntdll_wcstoumbs(unprefixed_start, unprefixed_len + 1, p, this_max_mb_len, FALSE);
+
+            p += this_mb_len;
+            total_mb_len += this_mb_len;
+        }
+
+        var += this_len + 1;
+    }
+
+    *promoted_env = mb_env;
+    *total_length = total_mb_len;
+    return TRUE;
+}
+
+static BOOL write_env(int sock, const WCHAR *pe_env, const char *winedebug)
+{
+    char **elem, *promoted_env = NULL;
+    uint64_t length = 0, promoted_length;
+    BOOL ret = TRUE;
+
+    for (elem = environ; *elem; elem++)
+        length += strlen(*elem) + 1;
+
+    if (winedebug)
+        length += strlen(winedebug) + 1;
+
+    if (!get_pe_env_var_promotions(pe_env, &promoted_env, &promoted_length))
+    {
+        ret = FALSE;
+        goto done;
+    }
+
+    length += promoted_length;
+
+    if (!write_data(sock, &length, sizeof(length)))
+    {
+        WARN("failed to write environment length\n");
+        ret = FALSE;
+        goto done;
+    }
+
+    /* In the case of duplicate variables, the final definition will win, so
+       note the order in which we send these - environ, then PE promotions, then
+       an explicit WINEDEBUG. */
+
+    for (elem = environ; *elem; elem++)
+    {
+        if (!write_data(sock, *elem, strlen(*elem) + 1))
+        {
+            WARN("failed to write environment variable\n");
+            ret = FALSE;
+            goto done;
+        }
+    }
+
+    if (promoted_env && promoted_length && !write_data(sock, promoted_env, promoted_length))
+    {
+        WARN("failed to write promoted PE environment\n");
+        ret = FALSE;
+        goto done;
+    }
+
+    if (winedebug && !write_data(sock, winedebug, strlen(winedebug) + 1))
+    {
+        WARN("failed to write environment variable\n");
+        ret = FALSE;
+        goto done;
+    }
+
+done:
+    free(promoted_env);
+    return ret;
+}
+
+static BOOL send_to_cx_loader(const RTL_USER_PROCESS_PARAMETERS *params,
+                              int wineserversocket, int stdin_fd, int stdout_fd, char *winedebug,
+                              const struct pe_image_info *pe_info)
+{
+    /* HKCU\Software\CrossOver\SuppressAltLoader */
+    /* FIXME: root hardcoded for now */
+#define HKCU_ROOT '\\','R','e','g','i','s','t','r','y','\\','U','s','e','r','\\','S','-','1','-','5','-','2','1','-','0','-','0','-','0','-','1','0','0','0','\\'
+    static const WCHAR suppress_key[] = {HKCU_ROOT,'S','o','f','t','w','a','r','e','\\',
+                                         'C','r','o','s','s','O','v','e','r','\\',
+                                         'S','u','p','p','r','e','s','s','A','l','t','L','o','a','d','e','r',0};
+    static const WCHAR use_key[] = {HKCU_ROOT,'S','o','f','t','w','a','r','e','\\',
+                                    'C','r','o','s','s','O','v','e','r','\\',
+                                    'U','s','e','A','l','t','L','o','a','d','e','r',0};
+    BOOL ret = FALSE;
+    const char *unixdir = NULL;  /* FIXME */
+    const char *socket_path;
+    char **argv;
+    int sock = -1;
+    struct sockaddr_un sa;
+    ssize_t rc;
+    uint32_t request_type;
+    char **elem;
+    uint64_t length;
+    uint8_t dummy;
+    struct iovec iov;
+    struct msghdr msg;
+    struct {
+        struct cmsghdr hdr;
+        int fds[5]; // standard in, out, and error, wineserver socket, and WINE_WAIT_CHILD_PIPE
+    } cmsg;
+    int nullfd = -1;
+    const char* wait_child_pipe;
+    uint32_t response;
+
+    TRACE("wineserversocket %d stdin_fd %d stdout_fd %d unixdir %s winedebug %s\n",
+          wineserversocket, stdin_fd, stdout_fd, debugstr_a(unixdir), debugstr_a(winedebug));
+
+    socket_path = getenv("CX_ALT_LOADER_SOCKET");
+    if (!socket_path)
+    {
+        TRACE("CX_ALT_LOADER_SOCKET is not set; nothing to do\n");
+        goto failed;
+    }
+
+    TRACE("socket path %s\n", debugstr_a(socket_path));
+
+    argv = build_argv( &params->CommandLine, 1 );
+    if (argv[1])
+    {
+        const char *exename, *p;
+        int len;
+        WCHAR *exenameW;
+        BOOL exists;
+
+        /* CW Hack 23741: Suppress the alt loader for a Rockstar launcher
+         * process with name too generic to put in the registry. */
+        if (strstr(argv[1], "\\Rockstar Games\\Launcher\\Launcher.exe"))
+        {
+            TRACE("alternative loader suppressed for Rockstar Launcher.exe\n");
+            goto failed;
+        }
+
+        exename = argv[1];
+        if ((p = strrchr(exename, '/'))) exename = p + 1;
+        if ((p = strrchr(exename, '\\'))) exename = p + 1;
+        if (!(p = strrchr(exename, '.'))) p = exename + strlen(exename);
+
+        exenameW = malloc( (p - exename + 1) * sizeof(WCHAR));
+        len = ntdll_umbstowcs(exename, p - exename, exenameW, p - exename);
+        exenameW[len] = 0;
+
+        if (has_key_value( exenameW, use_key, &exists ))
+        {
+            if (!exists)
+            {
+                TRACE("alternative loader skipped because exe name %s is not in whitelist (argv[1] %s)\n", debugstr_w(exenameW), debugstr_a(argv[1]));
+                free( exenameW);
+                goto failed;
+            }
+        }
+        else if (has_key_value( exenameW, suppress_key, &exists ))
+        {
+            if (exists)
+            {
+                TRACE("alternative loader suppressed for exe name %s (argv[1] %s)\n", debugstr_w(exenameW), debugstr_a(argv[1]));
+                free( exenameW);
+                goto failed;
+            }
+        }
+        free(exenameW);
+    }
+
+    sa.sun_family = AF_UNIX;
+    if (strlen(socket_path) >= sizeof(sa.sun_path))
+    {
+        WARN("socket path %s is too long for sockaddr_un\n", debugstr_a(socket_path));
+        goto failed;
+    }
+    lstrcpynA(sa.sun_path, socket_path, sizeof(sa.sun_path));
+#ifdef HAVE_STRUCT_SOCKADDR_UN_SUN_LEN
+    sa.sun_len = SUN_LEN(&sa) + 1;
+#endif
+
+    unsetenv("CX_ALT_LOADER_SOCKET");
+    socket_path = NULL;
+
+    sock = socket(PF_LOCAL, SOCK_STREAM, 0);
+    if (sock == -1)
+    {
+        WARN("failed to create socket; errno %d\n", errno);
+        goto failed;
+    }
+
+    if (fcntl(sock, F_SETFD, FD_CLOEXEC))
+        WARN("failed to set socket close-on-exec; proceeding anyway\n");
+
+    do
+    {
+        rc = connect(sock, (struct sockaddr*)&sa, sizeof(sa));
+    } while (rc == -1 && errno == EINTR);
+    if (rc)
+    {
+        WARN("failed to connect; errno %d\n", errno);
+        goto failed;
+    }
+
+    request_type = REQUEST_LOAD_WINE;
+    if (!write_data(sock, &request_type, sizeof(request_type)))
+    {
+        WARN("failed to write request type\n");
+        goto failed;
+    }
+
+    if (!write_length_prefixed_buffer(sock, unixdir, unixdir ? strlen(unixdir) + 1 : 0))
+    {
+        WARN("failed to write working directory\n");
+        goto failed;
+    }
+
+    if (!write_env(sock, params->Environment, winedebug))
+         goto failed;
+
+    length = 0;
+    for (elem = &argv[1]; *elem; elem++)
+    {
+        TRACE("argv[%d] %s\n", (int)(elem - argv), debugstr_a(*elem));
+        length += strlen(*elem) + 1;
+    }
+
+    if (!write_data(sock, &length, sizeof(length)))
+    {
+        WARN("failed to write args length\n");
+        goto failed;
+    }
+
+    for (elem = &argv[1]; *elem; elem++)
+    {
+        if (!write_data(sock, *elem, strlen(*elem) + 1))
+        {
+            WARN("failed to write argument\n");
+            goto failed;
+        }
+    }
+
+    if (params->ConsoleFlags || params->ConsoleHandle == (HANDLE)1 ||
+        (params->hStdInput == INVALID_HANDLE_VALUE && params->hStdOutput == INVALID_HANDLE_VALUE))
+    {
+        nullfd = open("/dev/null", O_RDWR);
+        stdin_fd = nullfd;
+        stdout_fd = nullfd;
+    }
+
+    iov.iov_base = &dummy;
+    iov.iov_len = sizeof(dummy);
+
+    cmsg.hdr.cmsg_level = SOL_SOCKET;
+    cmsg.hdr.cmsg_type = SCM_RIGHTS;
+    cmsg.fds[0] = stdin_fd == -1 ? 0 : stdin_fd;
+    cmsg.fds[1] = stdout_fd == -1 ? 1 : stdout_fd;
+    cmsg.fds[2] = 2;
+    cmsg.fds[3] = wineserversocket;
+    if ((wait_child_pipe = getenv("WINE_WAIT_CHILD_PIPE")) &&
+        (cmsg.fds[4] = atoi(wait_child_pipe)))
+        cmsg.hdr.cmsg_len = (char*)&cmsg.fds[5] - (char*)&cmsg;
+    else
+        cmsg.hdr.cmsg_len = (char*)&cmsg.fds[4] - (char*)&cmsg;
+
+    msg.msg_name = NULL;
+    msg.msg_namelen = 0;
+    msg.msg_iov = &iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = &cmsg;
+    msg.msg_controllen = cmsg.hdr.cmsg_len;
+    msg.msg_flags = 0;
+
+    do
+    {
+        rc = sendmsg(sock, &msg, 0);
+    } while (rc == -1 && errno == EINTR);
+    if (rc != 1)
+    {
+        WARN("failed to send file descriptors; errno %d\n", errno);
+        goto failed;
+    }
+
+    if (shutdown(sock, SHUT_WR))
+    {
+        WARN("failed to shutdown socket for writing; errno %d\n", errno);
+        goto failed;
+    }
+
+    if (!read_data(sock, &response, sizeof(response)))
+    {
+        WARN("failed to read response; errno %d\n", errno);
+        goto failed;
+    }
+
+    ret = (response == RESPONSE_SUCCESS);
+
+failed:
+    if (sock != -1) close(sock);
+    if (nullfd != -1) close(nullfd);
+    return ret;
+}
 
 static char **build_argv( const UNICODE_STRING *cmdline, int reserved )
 {
@@ -407,6 +847,8 @@ static NTSTATUS spawn_process( const RTL_USER_PROCESS_PARAMETERS *params, int so
     int stdin_fd = -1, stdout_fd = -1;
     pid_t pid;
     char **argv;
+    char *image_path_name_a;
+    int image_path_name_len;
 
     if (wine_server_handle_to_fd( params->hStdInput, FILE_READ_DATA, &stdin_fd, NULL ) &&
         isatty(0) && is_unix_console_handle( params->hStdInput ))
@@ -415,6 +857,11 @@ static NTSTATUS spawn_process( const RTL_USER_PROCESS_PARAMETERS *params, int so
     if (wine_server_handle_to_fd( params->hStdOutput, FILE_WRITE_DATA, &stdout_fd, NULL ) &&
         isatty(1) && is_unix_console_handle( params->hStdOutput ))
         stdout_fd = 1;
+
+    /* CrossOver Hack 10523: shunt the loading to CrossOver */
+    if (send_to_cx_loader(params, socketfd, stdin_fd, stdout_fd,
+                          winedebug, pe_info))
+        goto done;
 
     if (!(pid = fork()))  /* child */
     {
@@ -441,7 +888,52 @@ static NTSTATUS spawn_process( const RTL_USER_PROCESS_PARAMETERS *params, int so
             }
             argv = build_argv( &params->CommandLine, 2 );
 
-            exec_wineloader( argv, socketfd, pe_info );
+            /* CW HACK 22144: Pass the real image name to the loader. */
+            image_path_name_len = params->ImagePathName.Length / sizeof(WCHAR);
+            if ((image_path_name_a = malloc( image_path_name_len * 3 + 1 )))
+            {
+                image_path_name_len = ntdll_wcstoumbs( params->ImagePathName.Buffer, image_path_name_len, image_path_name_a, image_path_name_len * 3, FALSE );
+                image_path_name_a[image_path_name_len++] = 0;
+            }
+            else
+                image_path_name_a = argv[2];
+
+            /* CW Hack 24717: Promote specially prefixed PE variables into the Unix environment. */
+            {
+                static const WCHAR cx_unixW[] = {'_','_','C','X','_','U','N','I','X','_',0};
+                const WCHAR *ptr = params->Environment;
+                while (*ptr)
+                {
+                    if (!wcsncmp( ptr, cx_unixW, ARRAY_SIZE( cx_unixW ) - 1 ) &&
+                        ptr[ARRAY_SIZE( cx_unixW )] != '\0' &&
+                        ptr[ARRAY_SIZE( cx_unixW )] != '=')
+                    {
+                        const WCHAR *unprefixed_start = ptr + ARRAY_SIZE( cx_unixW ) - 1;
+                        DWORD unprefixed_len = wcslen( unprefixed_start );
+                        DWORD mb_len = unprefixed_len * 3 + 1;
+                        char *mb_str = malloc( mb_len );
+                        if (mb_str)
+                        {
+                            char *equals_sign;
+                            ntdll_wcstoumbs( unprefixed_start, unprefixed_len + 1, mb_str, mb_len, FALSE );
+                            equals_sign = strchr( mb_str, '=' );
+
+                            if (equals_sign && equals_sign[1] == '\0')
+                            {
+                                /* Empty value; unset. */
+                                *equals_sign = '\0';
+                                unsetenv( mb_str );
+                                free( mb_str );
+                            }
+                            else
+                                putenv( mb_str );
+                        }
+                    }
+                    ptr += wcslen(ptr) + 1;
+                }
+            }
+
+            exec_wineloader( argv, socketfd, pe_info, image_path_name_a );
             _exit(1);
         }
 
@@ -458,6 +950,7 @@ static NTSTATUS spawn_process( const RTL_USER_PROCESS_PARAMETERS *params, int so
     }
     else status = STATUS_NO_MEMORY;
 
+done: /* CrossOver Hack 10523 */
     if (stdin_fd != -1 && stdin_fd != 0) close( stdin_fd );
     if (stdout_fd != -1 && stdout_fd != 1) close( stdout_fd );
     return status;
@@ -1842,6 +2335,20 @@ NTSTATUS WINAPI NtSetInformationProcess( HANDLE handle, PROCESSINFOCLASS class, 
 
     case ProcessWineMakeProcessSystem:
         if (size != sizeof(HANDLE *)) return STATUS_INFO_LENGTH_MISMATCH;
+
+        /*  CodeWeavers-specific hack:  We need to exclude ourselves
+            from the winewrapper's wait-children process.  So we'll
+            close the wait-children pipe if it is defined.  */
+        {
+            const char *child_pipe = getenv("WINE_WAIT_CHILD_PIPE");
+            if (child_pipe)
+            {
+                int fd = atoi(child_pipe);
+                if (fd) close( fd );
+                unsetenv("WINE_WAIT_CHILD_PIPE");
+            }
+        }
+
         SERVER_START_REQ( make_process_system )
         {
             req->handle = wine_server_obj_handle( handle );

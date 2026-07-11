@@ -311,6 +311,9 @@ const unixlib_entry_t __wine_unix_call_funcs[] =
     iohid_bus_init,
     iohid_bus_wait,
     iohid_bus_stop,
+    xbox_bus_init,
+    xbox_bus_wait,
+    xbox_bus_stop,
     mouse_device_create,
     keyboard_device_create,
     unix_device_remove,
@@ -427,3 +430,141 @@ BOOL bus_event_queue_pop(struct list *queue, struct bus_event *event)
 
     return TRUE;
 }
+
+#ifdef _WIN64
+
+typedef ULONG PTR32;
+
+static NTSTATUS wow64_sdl_bus_init(void *args)
+{
+    struct
+    {
+        BOOL disable_sdl;
+        BOOL disable_hidraw;
+        BOOL disable_input;
+        BOOL disable_udevd;
+        BOOL split_controllers;
+        BOOL map_controllers;
+        UINT mappings_count;
+        PTR32 mappings;
+    } const *params32 = args;
+    struct bus_options params =
+    {
+        params32->disable_sdl,
+        params32->disable_hidraw,
+        params32->disable_input,
+        params32->disable_udevd,
+        params32->split_controllers,
+        params32->map_controllers,
+        params32->mappings_count,
+    };
+    PTR32 *mappings = UlongToPtr(params32->mappings);
+    NTSTATUS status;
+    int i;
+
+    params.mappings = malloc(params32->mappings_count * sizeof(char *));
+    for (i = 0; i < params32->mappings_count; ++i) params.mappings[i] = UlongToPtr(mappings[i]);
+
+    status = sdl_bus_init(args);
+
+    free(params.mappings);
+    return status;
+}
+
+static NTSTATUS wow64_unix_device_get_report_descriptor(void *args)
+{
+    struct
+    {
+        UINT64 device;
+        PTR32 buffer;
+        UINT length;
+        PTR32 out_length;
+    } const *params32 = args;
+    struct device_descriptor_params params =
+    {
+        params32->device,
+        ULongToPtr(params32->buffer),
+        params32->length,
+        ULongToPtr(params32->out_length),
+    };
+    return unix_device_get_report_descriptor(&params);
+}
+
+static NTSTATUS wow64_unix_device_set_output_report(void *args)
+{
+    struct
+    {
+        UINT64 device;
+        PTR32 packet;
+        PTR32 io;
+    } const *params32 = args;
+    struct device_report_params params =
+    {
+        params32->device,
+        ULongToPtr(params32->packet),
+        ULongToPtr(params32->io),
+    };
+    return unix_device_set_output_report(&params);
+}
+
+static NTSTATUS wow64_unix_device_get_feature_report(void *args)
+{
+    struct
+    {
+        UINT64 device;
+        PTR32 packet;
+        PTR32 io;
+    } const *params32 = args;
+    struct device_report_params params =
+    {
+        params32->device,
+        ULongToPtr(params32->packet),
+        ULongToPtr(params32->io),
+    };
+    return unix_device_get_feature_report(&params);
+}
+
+static NTSTATUS wow64_unix_device_set_feature_report(void *args)
+{
+    struct
+    {
+        UINT64 device;
+        PTR32 packet;
+        PTR32 io;
+    } const *params32 = args;
+    struct device_report_params params =
+    {
+        params32->device,
+        ULongToPtr(params32->packet),
+        ULongToPtr(params32->io),
+    };
+    return unix_device_set_feature_report(&params);
+}
+
+const unixlib_entry_t __wine_unix_call_wow64_funcs[] =
+{
+    wow64_sdl_bus_init,
+    sdl_bus_wait,
+    sdl_bus_stop,
+    udev_bus_init,
+    udev_bus_wait,
+    udev_bus_stop,
+    iohid_bus_init,
+    iohid_bus_wait,
+    iohid_bus_stop,
+    xbox_bus_init,
+    xbox_bus_wait,
+    xbox_bus_stop,
+    mouse_device_create,
+    keyboard_device_create,
+    unix_device_remove,
+    unix_device_start,
+    wow64_unix_device_get_report_descriptor,
+    wow64_unix_device_set_output_report,
+    wow64_unix_device_get_feature_report,
+    wow64_unix_device_set_feature_report,
+};
+
+C_ASSERT(ARRAYSIZE(__wine_unix_call_wow64_funcs) == unix_funcs_count);
+
+#endif  /* _WIN64 */

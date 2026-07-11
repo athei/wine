@@ -46,6 +46,8 @@ int topmost_float_inactive = TOPMOST_FLOAT_INACTIVE_NONFULLSCREEN;
 bool capture_displays_for_fullscreen = false;
 BOOL allow_vsync = TRUE;
 BOOL allow_set_gamma = TRUE;
+/* CrossOver Hack 10912: Mac Edit menu */
+int mac_edit_menu = MAC_EDIT_MENU_BY_KEY;
 bool left_option_is_alt = false;
 bool right_option_is_alt = false;
 bool left_command_is_ctrl = false;
@@ -61,6 +63,9 @@ bool enable_app_nap = false;
 
 UINT64 app_icon_callback = 0;
 UINT64 app_quit_request_callback = 0;
+UINT64 regcreateopenkeyexa_callback = 0;
+UINT64 regqueryvalueexa_callback = 0;
+UINT64 regsetvalueexa_callback = 0;
 
 CFDictionaryRef localized_strings;
 
@@ -327,6 +332,18 @@ static void setup_options(void)
     if (!get_config_key(hkey, appkey, "AllowSetGamma", buffer, sizeof(buffer)))
         allow_set_gamma = IS_OPTION_TRUE(buffer[0]);
 
+    /* CrossOver Hack 10912: Mac Edit menu */
+    if (!get_config_key(hkey, appkey, "EditMenu", buffer, sizeof(buffer)))
+    {
+        static const WCHAR messageW[] = {'m','e','s','s','a','g','e',0};
+        static const WCHAR keyW[] = {'k','e','y',0};
+        if (!wcscmp(buffer, messageW))
+            mac_edit_menu = MAC_EDIT_MENU_BY_MESSAGE;
+        else if (!wcscmp(buffer, keyW))
+            mac_edit_menu = MAC_EDIT_MENU_BY_KEY;
+        else
+            mac_edit_menu = MAC_EDIT_MENU_DISABLED;
+    }
     if (!get_config_key(hkey, appkey, "LeftOptionIsAlt", buffer, sizeof(buffer)))
         left_option_is_alt = IS_OPTION_TRUE(buffer[0]);
     if (!get_config_key(hkey, appkey, "RightOptionIsAlt", buffer, sizeof(buffer)))
@@ -431,6 +448,9 @@ static NTSTATUS macdrv_init(void *arg)
 
     app_icon_callback = params->app_icon_callback;
     app_quit_request_callback = params->app_quit_request_callback;
+    regcreateopenkeyexa_callback = params->regcreateopenkeyexa_callback;
+    regqueryvalueexa_callback = params->regqueryvalueexa_callback;
+    regsetvalueexa_callback = params->regsetvalueexa_callback;
 
     status = SessionGetInfo(callerSecuritySession, NULL, &attributes);
     if (status != noErr || !(attributes & sessionHasGraphicAccess))
@@ -594,6 +614,25 @@ BOOL macdrv_SystemParametersInfo( UINT action, UINT int_param, void *ptr_param, 
     return FALSE;
 }
 
+/* CW Hack 22310 */
+NTSTATUS macdrv_SetCurrentProcessExplicitAppUserModelID(const WCHAR *aumid)
+{
+    if (!macdrv_set_current_process_explicit_app_user_model_id(aumid, lstrlenW(aumid)))
+        return STATUS_INVALID_PARAMETER;
+
+    return 0;
+}
+
+/* CW Hack 22310 */
+NTSTATUS macdrv_GetCurrentProcessExplicitAppUserModelID(WCHAR *buffer, INT size)
+{
+    if (!buffer) return STATUS_INVALID_PARAMETER;
+
+    if (!macdrv_get_current_process_explicit_app_user_model_id(buffer, size))
+        return STATUS_BUFFER_TOO_SMALL;
+
+    return 0;
+}
 
 static NTSTATUS macdrv_quit_result(void *arg)
 {
@@ -620,12 +659,18 @@ static NTSTATUS wow64_init(void *arg)
         ULONG strings;
         UINT64 app_icon_callback;
         UINT64 app_quit_request_callback;
+        UINT64 regcreateopenkeyexa_callback;
+        UINT64 regqueryvalueexa_callback;
+        UINT64 regsetvalueexa_callback;
     } *params32 = arg;
     struct init_params params;
 
     params.strings = UlongToPtr(params32->strings);
     params.app_icon_callback = params32->app_icon_callback;
     params.app_quit_request_callback = params32->app_quit_request_callback;
+    params.regcreateopenkeyexa_callback = params32->regcreateopenkeyexa_callback;
+    params.regqueryvalueexa_callback = params32->regqueryvalueexa_callback;
+    params.regsetvalueexa_callback = params32->regsetvalueexa_callback;
     return macdrv_init(&params);
 }
 

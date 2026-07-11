@@ -1707,6 +1707,15 @@ size_t server_init_process(void)
         NtCurrentTeb()->WowTebOffset  = -teb_offset;
         wow_peb = (PEB64 *)((char *)peb - page_size);
 #endif
+
+        if (supported_machines_count > 2 &&
+            supported_machines[supported_machines_count - 1] == supported_machines[supported_machines_count - 2])
+        {
+            fprintf( stderr, "Using a 32-bit prefix in Wow64 mode (%s) pid %x. tid %x\n", config_dir,
+                     (unsigned int)pid, (unsigned int)tid );
+            supported_machines_count--;
+            wow64_using_32bit_prefix = TRUE;
+        }
     }
     else
     {
@@ -1724,7 +1733,6 @@ size_t server_init_process(void)
     fatal_error( "wineserver doesn't support the %04x architecture\n", current_machine );
 }
 
-
 /***********************************************************************
  *           server_init_process_done
  */
@@ -1732,6 +1740,7 @@ void server_init_process_done(void)
 {
     void *teb;
     unsigned int status;
+    const WCHAR *exename;
     int suspend;
     FILE_FS_DEVICE_INFORMATION info;
     struct ntdll_thread_data *thread_data = ntdll_get_thread_data();
@@ -1739,6 +1748,36 @@ void server_init_process_done(void)
     if (!get_device_info( initial_cwd, &info ) && (info.Characteristics & FILE_REMOVABLE_MEDIA))
         chdir( "/" );
     close( initial_cwd );
+
+    if ((exename = ntdll_wcsrchr( main_wargv[0], '\\' ))) exename++;
+    else exename = main_wargv[0];
+
+    /* CROSSOVER HACK: bug 3853 */
+    {
+        static const WCHAR explorerexeW[] = {'e','x','p','l','o','r','e','r','.','e','x','e',0};
+        const char *child_pipe = getenv("WINE_WAIT_CHILD_PIPE");
+        const char *ignore_child = getenv("WINE_WAIT_CHILD_PIPE_IGNORE");
+        if (child_pipe)
+        {
+            if (!ntdll_wcsicmp( exename, explorerexeW ))
+            {
+                int fd = atoi(child_pipe);
+                if (fd) close( fd );
+                unsetenv("WINE_WAIT_CHILD_PIPE");
+            }
+            else if (ignore_child)
+            {
+                WCHAR ignore[MAX_PATH];
+                ntdll_umbstowcs( ignore_child, strlen(ignore_child) + 1, ignore, MAX_PATH );
+                if (!ntdll_wcsicmp( exename, ignore ))
+                {
+                    int fd = atoi(child_pipe);
+                    if (fd) close( fd );
+                    unsetenv("WINE_WAIT_CHILD_PIPE");
+                }
+            }
+        }
+    }
 
 #ifdef __APPLE__
     send_server_task_port();
@@ -1921,7 +1960,7 @@ NTSTATUS WINAPI NtCompareTokens( HANDLE first, HANDLE second, BOOLEAN *equal )
 /**************************************************************************
  *           NtClose
  */
-NTSTATUS WINAPI NtClose( HANDLE handle )
+NTSTATUS WINAPI GPT_IMPORT(NtClose)( HANDLE handle )
 {
     sigset_t sigset;
     HANDLE port;
@@ -1960,6 +1999,18 @@ NTSTATUS WINAPI NtClose( HANDLE handle )
     }
     return ret;
 }
+
+/* CW Hack 23015 */
+#if defined(__APPLE__) && defined(__x86_64__)
+
+NTSTATUS __attribute__((ms_abi)) msthunk_NtClose( HANDLE handle )
+{
+    return sysv_NtClose( handle );
+}
+
+GPT_ABI_WRAPPER( NtClose );
+
+#endif
 
 #ifdef _WIN64
 

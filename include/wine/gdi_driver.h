@@ -439,6 +439,10 @@ struct user_driver_funcs
     UINT    (*pOpenGLInit)(UINT,const struct opengl_funcs *,const struct opengl_driver_funcs **);
     /* thread management */
     void    (*pThreadDetach)(void);
+    /* application user model ID support */
+    /* CW Hack 22310 */
+    NTSTATUS (*pSetCurrentProcessExplicitAppUserModelID)(LPCWSTR);
+    NTSTATUS (*pGetCurrentProcessExplicitAppUserModelID)(LPWSTR,INT);
 };
 
 W32KAPI void __wine_set_user_driver( const struct user_driver_funcs *funcs, UINT version );

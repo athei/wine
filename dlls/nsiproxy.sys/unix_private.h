@@ -181,3 +181,8 @@ NTSTATUS icmp_cancel_listen( void *args );
 NTSTATUS icmp_close( void *args );
 NTSTATUS icmp_listen( void *args );
 NTSTATUS icmp_send_echo( void *args );
+
+#ifdef _WIN64
+NTSTATUS wow64_icmp_listen( void *args );
+NTSTATUS wow64_icmp_send_echo( void *args );
+#endif /* _WIN64 */

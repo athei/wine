@@ -1023,3 +1023,56 @@ NTSTATUS icmp_close( void *args )
     handle_free( params->handle );
     return STATUS_SUCCESS;
 }
+
+#ifdef _WIN64
+
+typedef UINT PTR32;
+
+NTSTATUS wow64_icmp_listen( void *args )
+{
+    struct
+    {
+        icmp_handle handle;
+        PTR32 reply;
+        ULONGLONG user_reply_ptr;
+        unsigned int bits, reply_len;
+        int timeout;
+    } const *params32 = args;
+    struct icmp_listen_params params =
+    {
+        .handle = params32->handle,
+        .reply = ULongToPtr( params32->reply ),
+        .user_reply_ptr = params32->user_reply_ptr,
+        .bits = params32->bits,
+        .reply_len = params32->reply_len,
+        .timeout = params32->timeout
+    };
+    return icmp_listen( &params );
+}
+
+NTSTATUS wow64_icmp_send_echo( void *args )
+{
+    struct
+    {
+        PTR32 dst;
+        PTR32 request, reply;
+        UINT request_size, reply_len;
+        BYTE bits, ttl, tos;
+        PTR32 handle;
+    } const *params32 = args;
+    struct icmp_send_echo_params params =
+    {
+        .dst = ULongToPtr( params32->dst ),
+        .request = ULongToPtr( params32->request ),
+        .reply = ULongToPtr( params32->reply ),
+        .request_size = params32->request_size,
+        .reply_len = params32->reply_len,
+        .bits = params32->bits,
+        .ttl = params32->ttl,
+        .tos = params32->tos,
+        .handle = ULongToPtr( params32->handle )
+    };
+    return icmp_send_echo( &params );
+}
+
+#endif /* _WIN64 */

@@ -776,6 +776,27 @@ DWORD WINAPI GetFileVersionInfoSizeExW( DWORD flags, LPCWSTR filename, LPDWORD r
     if ((hModule = LoadLibraryExW( filename, 0, LOAD_LIBRARY_AS_IMAGE_RESOURCE )))
     {
         HRSRC hRsrc = NULL;
+
+        {
+            /* CW Hack 25427 */
+            static const char builtin_signature[] = "Wine builtin DLL";
+            WCHAR env_val[2];
+            HMODULE mod = (HMODULE)((ULONG_PTR)hModule & ~(ULONG_PTR)3);
+            char *signature = (char *)((IMAGE_DOS_HEADER *)mod + 1);
+            IMAGE_NT_HEADERS *nt;
+
+            if (GetEnvironmentVariableW( L"CX_HIDE_BUILTIN_VERSION_RESOURCES", env_val, ARRAY_SIZE(env_val) ) > 0
+                && env_val[0] == '1'
+                && (nt = RtlImageNtHeader( mod )) && (char *)nt - signature >= sizeof(builtin_signature)
+                && !memcmp( signature, builtin_signature, sizeof(builtin_signature) ))
+            {
+                ERR("HACK: not exposing version info.\n");
+                FreeLibrary( hModule );
+                SetLastError( ERROR_RESOURCE_NAME_NOT_FOUND );
+                return 0;
+            }
+        }
+
         if (!(flags & FILE_VER_GET_LOCALISED))
         {
             LANGID english = MAKELANGID( LANG_ENGLISH, SUBLANG_DEFAULT );

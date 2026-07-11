@@ -68,6 +68,10 @@ struct bus_options
     char **mappings;
 };
 
+struct xbox_bus_options
+{
+};
+
 enum bus_event_type
 {
     BUS_EVENT_TYPE_NONE,
@@ -145,6 +149,9 @@ enum unix_funcs
     iohid_init,
     iohid_wait,
     iohid_stop,
+    xbox_init,
+    xbox_wait,
+    xbox_stop,
     mouse_create,
     keyboard_create,
     device_remove,

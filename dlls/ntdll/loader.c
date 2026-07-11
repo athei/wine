@@ -89,6 +89,7 @@ static const WCHAR system_dir[] = L"C:\\windows\\system32\\";
 static const WCHAR system_path[] = L"C:\\windows\\system32;C:\\windows\\system;C:\\windows";
 
 static BOOL is_prefix_bootstrap;  /* are we bootstrapping the prefix? */
+static BOOL wow64_using_32bit_prefix;  /* are we using a 32-bit-only prefix in wow64 mode? */
 static BOOL imports_fixup_done = FALSE;  /* set once the imports have been fixed up, before attaching them */
 static BOOL process_detaching = FALSE;  /* set on process detach to avoid deadlocks with thread detach */
 static int free_lib_count;   /* recursion depth of LdrUnloadDll calls */
@@ -203,6 +204,21 @@ static FARPROC find_named_export( HMODULE module, const IMAGE_EXPORT_DIRECTORY *
 static inline BOOL contains_path( LPCWSTR name )
 {
     return ((*name && (name[1] == ':')) || wcschr(name, '/') || wcschr(name, '\\'));
+}
+
+static BOOL get_env( const WCHAR *var, WCHAR *val, unsigned int len )
+{
+    UNICODE_STRING name, value;
+
+    name.Length = wcslen( var ) * sizeof(WCHAR);
+    name.MaximumLength = name.Length + sizeof(WCHAR);
+    name.Buffer = (WCHAR *)var;
+
+    value.Length = 0;
+    value.MaximumLength = len;
+    value.Buffer = val;
+
+    return !RtlQueryEnvironmentVariable_U( NULL, &name, &value );
 }
 
 #define RTL_UNLOAD_EVENT_TRACE_NUMBER 64
@@ -1393,6 +1409,9 @@ static BOOL alloc_tls_slot( LDR_DATA_TABLE_ENTRY *mod )
             if (!new) return FALSE;
             if (old) memcpy( new, old, old_module_count * sizeof(*new) );
             teb->ThreadLocalStoragePointer = new;
+#ifdef __x86_64__  /* macOS-specific hack */
+            if (teb->Instrumentation[0]) ((TEB *)teb->Instrumentation[0])->ThreadLocalStoragePointer = new;
+#endif
             TRACE( "thread %04lx tls block %p -> %p\n", HandleToULong(teb->ClientId.UniqueThread), old, new );
             /* FIXME: can't free old block here, should be freed at thread exit */
         }
@@ -1638,6 +1657,10 @@ static NTSTATUS alloc_thread_tls(void)
         TRACE( "slot %u: %u/%lu bytes at %p\n", i, size, dir->SizeOfZeroFill, pointers[i] );
     }
     NtCurrentTeb()->ThreadLocalStoragePointer = pointers;
+#ifdef __x86_64__  /* macOS-specific hack */
+    if (NtCurrentTeb()->Instrumentation[0])
+        ((TEB *)NtCurrentTeb()->Instrumentation[0])->ThreadLocalStoragePointer = pointers;
+#endif
     return STATUS_SUCCESS;
 }
 
@@ -2243,6 +2266,12 @@ done:
     return status;
 }
 
+#if defined(__i386__) || defined(__x86_64__)
+static void apply_binary_patches( WINE_MODREF* wm );
+#endif
+#ifdef __x86_64__
+static void apply_fuzzy_binary_patches( WINE_MODREF* wm );
+#endif
 
 /*************************************************************************
  *		build_module
@@ -2324,6 +2353,28 @@ static NTSTATUS build_module( LPCWSTR load_path, const UNICODE_STRING *nt_name, 
 
     TRACE_(loaddll)( "Loaded %s at %p: %s\n", debugstr_w(wm->ldr.FullDllName.Buffer), *module,
                      is_builtin ? "builtin" : "native" );
+
+#if defined(__x86_64__)
+    /* CW HACK 22434 */
+    if (is_builtin == FALSE)
+    {
+	struct pe_module_loaded_params params = { *module, (void*)((BYTE*)*module + map_size) };
+	WINE_UNIX_CALL( unix_pe_module_loaded, &params );
+    }
+#endif
+
+#if defined(__i386__) || defined(__x86_64__)
+    if (!wcscmp( wm->ldr.BaseDllName.Buffer, L"libcef.dll" ) ||
+        !wcscmp( wm->ldr.BaseDllName.Buffer, L"Qt5WebEngineCore.dll" ))
+    {
+        apply_binary_patches( wm );
+    }
+#endif
+
+#if defined(__x86_64__)
+    if (!wcscmp( wm->ldr.BaseDllName.Buffer, L"cohtml_Unity3DPlugin.dll" ))
+        apply_fuzzy_binary_patches( wm );
+#endif
 
     wm->ldr.LoadCount = 1;
     *pwm = wm;
@@ -2752,6 +2803,8 @@ static NTSTATUS open_known_dll( const WCHAR *libname, UNICODE_STRING *nt_name, W
     OBJECT_ATTRIBUTES attr;
 
     if (!known_dlls_ntdir) return STATUS_DLL_NOT_FOUND;
+    /* CW HACK 20810: In Wow64/32-bit-bottle mode, don't load from KnownDlls */
+    if (wow64_using_32bit_prefix) return STATUS_DLL_NOT_FOUND;
     RtlInitUnicodeString( &str, libname );
     InitializeObjectAttributes( &attr, &str, OBJ_CASE_INSENSITIVE, known_dlls_ntdir, NULL );
     if ((status = NtOpenSection( mapping, MAXIMUM_ALLOWED, &attr ))) return status;
@@ -2795,6 +2848,554 @@ static WINE_MODREF *find_existing_module( HMODULE module )
     return NULL;
 }
 
+#ifdef __x86_64__
+
+static BOOL byte_pattern_matches( const char *addr, char wildcard_byte,
+                                  const char *pattern, size_t pattern_size )
+{
+    size_t i;
+    for (i = 0; i < pattern_size; i++)
+    {
+        if (pattern[i] != wildcard_byte && addr[i] != pattern[i])
+            return FALSE;
+    }
+
+    return TRUE;
+}
+
+static void *find_byte_pattern( void *dllbase, size_t size_of_image,
+                                char wildcard_byte, const char *pattern, size_t pattern_size )
+{
+    size_t offset;
+    for (offset = 0; offset <= size_of_image - pattern_size; offset++)
+    {
+        char *addr = (char *)dllbase + offset;
+        if (byte_pattern_matches( addr, wildcard_byte, pattern, pattern_size ))
+            return addr;
+    }
+
+    return NULL;
+}
+
+static void apply_byte_pattern_patch( void *addr, char wildcard_byte, const char *after, size_t after_size )
+{
+    size_t i;
+    for (i = 0; i < after_size; i++)
+    {
+        if (after[i] != wildcard_byte)
+            ((char *)addr)[i] = after[i];
+    }
+}
+
+static void apply_fuzzy_binary_patches( WINE_MODREF *wm )
+{
+    static const char before_cohtml_v1[] =
+    {
+        0xcc,                                /* int3 */
+        0x40, 0xff,                          /* push <wildcard> */
+        0x48, 0xff, 0xff, 0xff,              /* sub <wildcard>, <wildcard> */
+        0x80, 0xff, 0xff, 0xff,              /* cmp <wildcard>, <wildcard> */
+        0x48, 0xff, 0xff,                    /* mov <wildcard>, <wildcard> */
+        0x0f, 0x84                           /* jz ... */
+    };
+    static const char after_cohtml_v1[] = {
+        0xff,                                /* (unchanged) */
+        0xff, 0xff,                          /* (unchanged) */
+        0xff, 0xff, 0xff, 0xff,              /* (unchanged) */
+        0xff, 0xff, 0xff, 0xff,              /* (unchanged) */
+        0xff, 0xff, 0xff,                    /* (unchanged) */
+        0xff, 0x85                           /* jnz ... */
+    };
+    C_ASSERT( sizeof(before_cohtml_v1) == sizeof(after_cohtml_v1) );
+
+
+    struct {
+        const WCHAR *libname;
+        const char *name;
+        char wildcard_byte;
+        const char *before, *after;
+        size_t size;
+        BOOL stop_patching_after_success;
+        /* If should_apply is non-null, the patch is only applied if it returns
+         * true (in addition to meeting the other criteria). */
+        BOOL (*should_apply)(void);
+    } static const patches[] =
+    {
+        /* CW HACK 22901: cohtml_Unity3DPlugin.dll for Cities Skylines 2. */
+        {
+            L"cohtml_Unity3DPlugin.dll",
+            "cohtml_v1",
+            0xff,
+            before_cohtml_v1, after_cohtml_v1,
+            sizeof(before_cohtml_v1),
+            TRUE,
+            NULL
+        }
+    };
+
+    unsigned int i;
+    SIZE_T pagesize = page_size;
+    WCHAR *libname = wm->ldr.BaseDllName.Buffer;
+
+    for (i = 0; i < ARRAY_SIZE(patches); i++)
+    {
+        DWORD old_prot;
+        void *dllbase = wm->ldr.DllBase;
+        void *target, *target_page;
+
+        if (wcscmp( libname, patches[i].libname ))
+            continue;
+
+        if (patches[i].should_apply && !patches[i].should_apply())
+        {
+            TRACE( "predicate function said we should not apply %s to %s\n", patches[i].name, debugstr_w(libname) );
+            continue;
+        }
+
+        target = find_byte_pattern( dllbase, wm->ldr.SizeOfImage,
+                                    patches[i].wildcard_byte, patches[i].before, patches[i].size );
+
+        if (!target)
+        {
+            TRACE( "%s doesn't match %s\n", debugstr_w(libname), patches[i].name );
+            continue;
+        }
+
+        TRACE( "Found %s %s byte pattern at %p; applying patch\n", debugstr_w(libname), patches[i].name, target );
+        target_page = (void *)((ULONG_PTR)target & ~(page_size-1));
+        NtProtectVirtualMemory( NtCurrentProcess(), &target_page, &pagesize, PAGE_EXECUTE_READWRITE, &old_prot );
+        apply_byte_pattern_patch( target, patches[i].wildcard_byte, patches[i].after, patches[i].size );
+        NtProtectVirtualMemory( NtCurrentProcess(), &target_page, &pagesize, old_prot, &old_prot );
+
+        if (patches[i].stop_patching_after_success)
+            break;
+    }
+}
+#endif
+
+#if defined(__i386__) || defined(__x86_64__)
+static void apply_binary_patches( WINE_MODREF* wm )
+{
+#ifdef __x86_64__
+    static const char before_85_3_9_0[] =
+    {
+        0x65, 0x48, 0x8b, 0x04, 0x25, 0x08, 0x00, 0x00, 0x00, /* mov rax, qword [gs:0x8] */
+        0xc3,                                                 /* ret */
+        0xcc,                                                 /* int3 */
+        0xcc,                                                 /* int3 */
+        0xcc,                                                 /* int3 */
+        0xcc,                                                 /* int3 */
+        0xcc,                                                 /* int3 */
+        0xcc,                                                 /* int3 */
+        0x48, 0x83, 0xec, 0x28,                               /* sub rsp, 0x28 */
+        0x65, 0x48, 0x8b, 0x04, 0x25, 0x08, 0x00, 0x00, 0x00, /* mov rax, qword [gs:0x8] */
+        0x48, 0x83, 0xc0, 0xf8                                /* add rax, 0xfffffffffffffff8 */
+    };
+    static const char after_85_3_9_0[] =
+    {
+        0x65, 0x48, 0x8b, 0x04, 0x25, 0x30, 0x00, 0x00, 0x00, /* mov rax, qword [gs:0x30] */
+        0x48, 0x8b, 0x40, 0x08,                               /* mov rax, qword [rax+8] */
+        0xc3,                                                 /* ret */
+        0xcc,                                                 /* int3 */
+        0xcc,                                                 /* int3 */
+        0x48, 0x83, 0xec, 0x28,                               /* sub rsp, 0x28 */
+        0xe8, 0xe7, 0xff, 0xff, 0xff,                         /* call 0xfffffffffffffffe */
+        0x90,                                                 /* nop */
+        0x90,                                                 /* nop */
+        0x90,                                                 /* nop */
+        0x90,                                                 /* nop */
+        0x48, 0x83, 0xc0, 0xf8                                /* add rax,0xfffffffffffffff8 */
+    };
+    C_ASSERT( sizeof(before_85_3_9_0) == sizeof(after_85_3_9_0) );
+
+
+    /* The first patch needed for 85.3.11 is the same as 85_3_9_0, just at a different offset. */
+
+    static const char before_85_3_11_1[] =
+    {
+        0x48, 0x8b, 0x44, 0x24, 0x28,  /* mov rax, qword ptr [rsp + 0x28] */
+        0x65, 0x48, 0x8b, 0x34, 0x25, 0x08, 0x00, 0x00, 0x00,  /* mov rsi, qword ptr gs:[0x8] */
+        0x48, 0x85, 0xf6,              /* test rsi, rsi */
+        0x74, 0x2e                     /* jz 0x028c525b */
+
+    };
+    static const char after_85_3_11_1[] =
+    {
+        /* Taking a cue from after_72_0_3626_121_2 - overwriting the test and jump to make room. */
+        0x48, 0x8b, 0x44, 0x24, 0x28,  /* mov rax, qword ptr [rsp + 0x28] */
+        0x65, 0x48, 0x8b, 0x34, 0x25, 0x30, 0x00, 0x00, 0x00,  /* mov rsi, qword ptr gs:[0x30] */
+        0x48, 0x8b, 0x76, 0x08,        /* mov rsi, qword ptr [rsi+8] */
+        0x90,                          /* nop */
+    };
+    C_ASSERT( sizeof(before_85_3_11_1) == sizeof(after_85_3_11_1) );
+
+
+    static const char before_72_0_3626_121_1[] =
+    {
+        0x65, 0x48, 0x8b, 0x04, 0x25, 0x08, 0x00, 0x00, 0x00, /* mov rax, qword [gs:0x8] */
+        0xc3,                                                 /* ret */
+        0x48, 0x83, 0xec, 0x28,                               /* sub rsp, 0x28 */
+        0x65, 0x48, 0x8b, 0x04, 0x25, 0x08, 0x00, 0x00, 0x00, /* mov rax, qword [gs:0x8] */
+        0x48, 0x83, 0xc0, 0xf8,                               /* add rax, 0xfffffffffffffff8 */
+    };
+    static const char after_72_0_3626_121_1[] =
+    {
+        0xe8, 0xb7, 0x00, 0x00, 0x00, /* call 0xbc */
+        0x90,                         /* nop */
+        0x90,                         /* nop */
+        0x90,                         /* nop */
+        0x90,                         /* nop */
+        0xc3,                         /* ret */
+        0x48, 0x83, 0xec, 0x28,       /* sub rsp, 0x28 */
+        0xe8, 0xa9, 0x00, 0x00, 0x00, /* call 0xae */
+        0x90,                         /* nop */
+        0x90,                         /* nop */
+        0x90,                         /* nop */
+        0x90,                         /* nop */
+        0x48, 0x83, 0xc0, 0xf8,       /* add rax, 0xfffffffffffffff8 */
+    };
+    C_ASSERT( sizeof(before_72_0_3626_121_1) == sizeof(after_72_0_3626_121_1) );
+
+    static const char before_72_0_3626_121_2[] =
+    {
+        0x48, 0x8b, 0x46, 0x08,                                 /* mov rax, qword [rsi+8] */
+        0x65, 0x48, 0x8b, 0x34, 0x25, 0x08, 0x00, 0x00, 0x00,   /* mov rsi, qword [gs:0x8] */
+        0x48, 0x85, 0xf6,                                       /* test rsi, rsi */
+        0x74, 0x2e,                                             /* je 0x30 */
+    };
+    static const char after_72_0_3626_121_2[] =
+    {
+        0x48, 0x8b, 0x46, 0x08,                                 /* mov rax, qword [rsi+8] */
+        0x65, 0x48, 0x8b, 0x34, 0x25, 0x30, 0x00, 0x00, 0x00,   /* mov rsi, qword [gs:0x30] */
+        0x48, 0x8b, 0x76, 0x08,                                 /* mov rsi, qword [rsi+8] */
+        0x90,                                                   /* nop */
+    };
+    C_ASSERT( sizeof(before_72_0_3626_121_2) == sizeof(after_72_0_3626_121_2) );
+
+    static const char before_72_0_3626_121_3[] =
+    {
+        0xcc,       /* int3 */
+        0x0f, 0x0b, /* ud2 */
+        0x6a, 0x1c, /* push 0x1c */
+        0x0f, 0x0b, /* ud2 */
+        0xcc,       /* int3 */
+        0x0f, 0x0b, /* ud2 */
+        0x6a, 0x1d, /* push 0x1d */
+        0x0f, 0x0b  /* ud2 */
+    };
+    static const char after_72_0_3626_121_3[] =
+    {
+        0x65, 0x48, 0x8b, 0x04, 0x25, 0x30, 0x00, 0x00, 0x00, /* mov rax, qword [gs:0x30] */
+        0x48, 0x8b, 0x40, 0x08,                               /* mov rax, qword [rax+8] */
+        0xc3,                                                 /* ret */
+    };
+    C_ASSERT( sizeof(before_72_0_3626_121_3) == sizeof(after_72_0_3626_121_3) );
+
+    static const char before_qt_5_15_2_0_1[] =
+    {
+        0x65, 0x48, 0x8b, 0x04, 0x25, 0x08, 0x00, 0x00, 0x00, /* mov rax, qword [gs:0x8] */
+        0xc3,                                                 /* ret */
+        0xcc,                                                 /* int3 */
+        0xcc,                                                 /* int3 */
+        0xcc,                                                 /* int3 */
+        0xcc,                                                 /* int3 */
+        0xcc,                                                 /* int3 */
+        0xcc,                                                 /* int3 */
+        0x48, 0x83, 0xec, 0x28,                               /* sub rsp, 0x28 */
+        0x65, 0x48, 0x8b, 0x04, 0x25, 0x08, 0x00, 0x00, 0x00, /* mov rax, qword [gs:0x8] */
+        0x48, 0x83, 0xe8, 0x08                                /* sub rax, 0x8 */
+    };
+    static const char after_qt_5_15_2_0_1[] =
+    {
+        0x65, 0x48, 0x8b, 0x04, 0x25, 0x30, 0x00, 0x00, 0x00, /* mov rax, qword [gs:0x30] */
+        0x48, 0x8b, 0x40, 0x08,                               /* mov rax, qword [rax+8] */
+        0xc3,                                                 /* ret */
+        0xcc,                                                 /* int3 */
+        0xcc,                                                 /* int3 */
+        0x48, 0x83, 0xec, 0x28,                               /* sub rsp, 0x28 */
+        0xe8, 0xe7, 0xff, 0xff, 0xff,                         /* call 0xfffffffffffffffe */
+        0x90,                                                 /* nop */
+        0x90,                                                 /* nop */
+        0x90,                                                 /* nop */
+        0x90,                                                 /* nop */
+        0x48, 0x83, 0xe8, 0x08                                /* sub rax,0x8 */
+    };
+    C_ASSERT( sizeof(before_qt_5_15_2_0_1) == sizeof(after_qt_5_15_2_0_1) );
+
+    static const char before_qt_5_15_2_0_2[] = {
+        0xff, 0x15, 0xd5, 0xb4, 0x6e, 0x02,                   /* call [KERNEL32.DLL::VirtualQuery] */
+        0x65, 0x48, 0x8b, 0x04, 0x25, 0x08, 0x00, 0x00, 0x00, /* mov rax, qword [gs:0x8] */
+        0x48, 0x8b, 0x4c, 0x24, 0x28                          /* mov rcx, qword [rsp+0x28] */
+    };
+    static const char after_qt_5_15_2_0_2[] = {
+        0xff, 0x15, 0xd5, 0xb4, 0x6e, 0x02, /* call [KERNEL32.DLL::VirtualQuery] */
+        0xe8, 0x78, 0xff, 0xff, 0xff,       /* call 0xfffffffffffffffe */
+        0x90,                               /* nop */
+        0x90,                               /* nop */
+        0x90,                               /* nop */
+        0x90,                               /* nop */
+        0x48, 0x8b, 0x4c, 0x24, 0x28        /* mov rcx, qword [rsp+0x28] */
+    };
+    C_ASSERT( sizeof(before_qt_5_15_2_0_2) == sizeof(after_qt_5_15_2_0_2) );
+
+
+    static const char before_epic_cmd_line_args_90_6_7[] = {
+        0x8b, 0x47, 0x64,
+        0x89, 0x43, 0x64,
+        0x8b, 0x47, 0x68,              /* mov eax, dword ptr [rdi+0x68] */
+        0x89, 0x43, 0x68,              /* mov dword ptr [rbx + 0x68], eax */
+    };
+    static const char after_epic_cmd_line_args_90_6_7[] = {
+        0x8b, 0x47, 0x64,
+        0x89, 0x43, 0x64,
+        0x31, 0xc0,                     /* xor eax, eax */
+        0x90,                           /* nop */
+        0x89, 0x43, 0x68                /* mov dword ptr [rsi+0x68], eax */
+    };
+    C_ASSERT( sizeof(before_epic_cmd_line_args_90_6_7) == sizeof(after_epic_cmd_line_args_90_6_7) );
+#endif  /* __x86_64__ */
+
+#ifdef __i386__
+    static const char before_cmd_line_args_111_2_7[] = {
+        0x8b, 0x47, 0x38,
+        0x89, 0x46, 0x38,
+        0x8b, 0x47, 0x3c,               /* mov eax, dword ptr [edi+0x3c] */
+        0x89, 0x46, 0x3c                /* mov dword ptr [esi+0x3c], eax */
+    };
+    static const char after_cmd_line_args_111_2_7[] = {
+        0x8b, 0x47, 0x38,
+        0x89, 0x46, 0x38,
+        0x31, 0xc0,                     /* xor eax, eax */
+        0x90,                           /* nop */
+        0x89, 0x46, 0x3c                /* mov dword ptr [esi+0x3c], eax */
+    };
+    C_ASSERT( sizeof(before_cmd_line_args_111_2_7) == sizeof(after_cmd_line_args_111_2_7) );
+
+    static const char before_cmd_line_args_135_0_20[] = {
+        0x8b, 0x47, 0x34,
+        0x89, 0x46, 0x34,
+        0x8b, 0x47, 0x38,               /* mov eax, dword ptr [edi+0x38] */
+        0x89, 0x46, 0x38                /* mov dword ptr [esi+0x38], eax */
+    };
+    static const char after_cmd_line_args_135_0_20[] = {
+        0x8b, 0x47, 0x34,
+        0x89, 0x46, 0x34,
+        0x31, 0xc0,                     /* xor eax, eax */
+        0x90,                           /* nop */
+        0x89, 0x46, 0x38                /* mov dword ptr [esi+0x38], eax */
+    };
+    C_ASSERT( sizeof(before_cmd_line_args_135_0_20) == sizeof(after_cmd_line_args_135_0_20) );
+#endif  /* __i386__ */
+
+
+    struct
+    {
+        const WCHAR *libname;
+        const char *name;
+        const void *before, *after;
+        size_t size;
+        ULONG_PTR offset;
+        BOOL stop_patching_after_success;
+    } static const patches[] =
+    {
+#ifdef __x86_64__
+        /* CW HACK 22584L
+         * libcef.dll 85.3.11, for an updated Rockstar Games Social Club/Launcher.
+         */
+        {
+            L"libcef.dll",
+            "CEF %gs 85.3.11-0",
+            /* This patch is identical to the one for 85.3.9, just at a different offset. */
+            before_85_3_9_0, after_85_3_9_0,
+            sizeof(before_85_3_9_0),
+            0x28c5190,
+            FALSE
+        },
+        {
+            L"libcef.dll",
+            "CEF %gs 85.3.11-1",
+            before_85_3_11_1, after_85_3_11_1,
+            sizeof(before_85_3_11_1),
+            0x28c521a,
+            TRUE
+        },
+
+        /* CW HACK 18582:
+         * libcef.dll 85.3.9.0 used by the Rockstar Games Social Club/Launcher
+         * (and downloadable from
+         * https://cef-builds.spotifycdn.com/index.html#windows64).
+         */
+        {
+            L"libcef.dll",
+            "CEF %gs 85.3.9.0",
+            before_85_3_9_0, after_85_3_9_0,
+            sizeof(before_85_3_9_0),
+            0x28c4b30,
+            TRUE
+        },
+
+        /* CW HACK 19114:
+         * libcef.dll 72.0.3626.121 used by the game beamNG.drive.
+         * Patch also works for version downloadable from CEF builds.
+         */
+        {
+            L"libcef.dll",
+            "CEF %gs 72.0.3626.121-0",
+            before_72_0_3626_121_1, after_72_0_3626_121_1,
+            sizeof(before_72_0_3626_121_1),
+            0x23bb2ad,
+            FALSE
+        },
+        {
+            L"libcef.dll",
+            "CEF %gs 72.0.3626.121-1",
+            before_72_0_3626_121_2, after_72_0_3626_121_2,
+            sizeof(before_72_0_3626_121_2),
+            0x23bb329,
+            FALSE
+        },
+        {
+            L"libcef.dll",
+            "CEF %gs 72.0.3626.121-2",
+            before_72_0_3626_121_3, after_72_0_3626_121_3,
+            sizeof(before_72_0_3626_121_3),
+            0x23bb369,
+            TRUE
+        },
+
+        /* CW HACK 16900:
+         * libcef.dll 72.0.3626.96 used by the game Wizard101.
+         * Patch also works for version 3.3626.1886.g162fdec downloadable from CEF builds.
+         */
+        {
+            L"libcef.dll",
+            "CEF %gs 72.0.3626.96-0",
+            /* This patch is identical to the one for 72.0.3626.121, just at a different offset. */
+            before_72_0_3626_121_1, after_72_0_3626_121_1,
+            sizeof(before_72_0_3626_121_1),
+            0x23bb82d,
+            FALSE
+        },
+        {
+            L"libcef.dll",
+            "CEF %gs 72.0.3626.96-1",
+            before_72_0_3626_121_2, after_72_0_3626_121_2,
+            sizeof(before_72_0_3626_121_2),
+            0x23bb8a9,
+            FALSE
+        },
+        {
+            L"libcef.dll",
+            "CEF %gs 72.0.3626.96-2",
+            before_72_0_3626_121_3, after_72_0_3626_121_3,
+            sizeof(before_72_0_3626_121_3),
+            0x23bb8e9,
+            TRUE
+        },
+
+        /* CW HACK 21548:
+         * Qt5WebEngineCore.dll 5.15.2.0 used by the EA Launcher.
+         * Based on CEF 83.0.4103.122, but has different offsets.
+         */
+        {
+            L"Qt5WebEngineCore.dll",
+            "CEF/Qt5WebEngineCore %gs 5.15.2.0-0",
+            before_qt_5_15_2_0_1, after_qt_5_15_2_0_1,
+            sizeof(before_qt_5_15_2_0_1),
+            0x2810f10,
+            FALSE
+        },
+        {
+            L"Qt5WebEngineCore.dll",
+            "CEF/Qt5WebEngineCore %gs 5.15.2.0-1",
+            before_qt_5_15_2_0_2, after_qt_5_15_2_0_2,
+            sizeof(before_qt_5_15_2_0_2),
+            0x2810f8d,
+            TRUE
+        },
+
+        /* CW HACK 23854:
+         * Ignore the command_line_args_disabled flag in the cef_settings_t
+         * passed to cef_inititalize. Always set it to 0.
+         */
+        {
+            L"libcef.dll",
+            "CEF cmd_line_args_disabled 90.6.7",
+            before_epic_cmd_line_args_90_6_7,
+            after_epic_cmd_line_args_90_6_7,
+            sizeof(before_epic_cmd_line_args_90_6_7),
+            0x3807,
+            TRUE
+        },
+#endif  /* __x86_64__ */
+
+#ifdef __i386__
+        /* CW HACK 19252:
+         * 32-bit libcef 111.2.7+gebf5d6a+chromium-111.0.5563.148.
+         * (For Ubisoft Connect, has same offsets as CEF builds).
+         * Ignore the command_line_args_disabled flag in the cef_settings_t
+         * passed to cef_inititalize. Always set it to 0.
+         */
+        {
+            L"libcef.dll",
+            "CEF cmd_line_args_disabled x86 111.2.7",
+            before_cmd_line_args_111_2_7,
+            after_cmd_line_args_111_2_7,
+            sizeof(before_cmd_line_args_111_2_7),
+            0x114a43,
+            TRUE
+        },
+
+        /* CW HACK 25737:
+           32-bit libcef 135.0.20+ge7de5c3+chromium-135.0.7049.85.
+           For command_line_args_disabled in an updated Ubisoft Connect. */
+        {
+            L"libcef.dll",
+            "CEF cmd_line_args_disabled x86 135.0.20",
+            before_cmd_line_args_135_0_20,
+            after_cmd_line_args_135_0_20,
+            sizeof(before_cmd_line_args_135_0_20),
+            0x11e92d,
+            TRUE
+        },
+#endif  /* __i386__ */
+    };
+
+    unsigned int i;
+    SIZE_T pagesize = page_size;
+    WCHAR *libname = wm->ldr.BaseDllName.Buffer;
+
+    for (i = 0; i < ARRAY_SIZE(patches); i++)
+    {
+        DWORD old_prot;
+        void *dllbase = wm->ldr.DllBase;
+        void *target = (void *)((ULONG_PTR)dllbase + patches[i].offset);
+        void *target_page = (void *)((ULONG_PTR)target & ~(page_size-1));
+
+        if (wcscmp( libname, patches[i].libname ))
+            continue;
+
+        if (wm->ldr.SizeOfImage < patches[i].offset)
+        {
+            TRACE( "%s too small to match patch '%s'\n", debugstr_w(libname), patches[i].name );
+            continue;
+        }
+        if (memcmp( target, patches[i].before, patches[i].size ))
+        {
+            TRACE( "%s doesn't match patch '%s'\n", debugstr_w(libname), patches[i].name );
+            continue;
+        }
+
+        TRACE( "Found matching %s, applying patch '%s'\n", debugstr_w(libname), patches[i].name );
+        NtProtectVirtualMemory( NtCurrentProcess(), &target_page, &pagesize, PAGE_EXECUTE_READWRITE, &old_prot );
+        memcpy( target, patches[i].after, patches[i].size );
+        NtProtectVirtualMemory( NtCurrentProcess(), &target_page, &pagesize, old_prot, &old_prot );
+
+        if (patches[i].stop_patching_after_success)
+            break;
+    }
+}
+#endif
 
 /******************************************************************************
  *	load_native_dll  (internal)
@@ -3141,7 +3742,8 @@ static NTSTATUS find_builtin_without_file( const WCHAR *name, UNICODE_STRING *ne
 
     if (contains_path( name )) return status;
 
-    if (!is_prefix_bootstrap)
+    /* CW HACK 20810: In Wow64/32-bit-bottle mode, 64-bit DLLs (like wow64*) won't be present in the prefix. */
+    if (!is_prefix_bootstrap && !wow64_using_32bit_prefix)
     {
         /* 16-bit files can't be loaded from the prefix */
         if (!name[1] || wcscmp( name + wcslen(name) - 2, L"16" )) return status;
@@ -3210,6 +3812,22 @@ static NTSTATUS search_dll_file( LPCWSTR paths, LPCWSTR search, UNICODE_STRING *
     BOOL found_image = FALSE;
     NTSTATUS status = STATUS_DLL_NOT_FOUND;
     ULONG len;
+
+    /* CW HACK 20810:
+     * 32-bit bottles from CrossOver 20 and earlier contain a stub wow64cpu.dll.
+     * In Wow64/32-bit-bottle mode, this causes problems and isn't usable.
+     * Return DLL_NOT_FOUND so the builtin gets used instead.
+     */
+    if (wow64_using_32bit_prefix && !wcscmp(search, L"wow64cpu.dll"))
+        return STATUS_DLL_NOT_FOUND;
+
+    /* CW HACK 20810:
+     * 32-bit bottles from CrossOver 22 and earlier contain a fake win32u.dll.
+     * In Wow64/32-bit-bottle mode, this causes problems and isn't usable.
+     * Return DLL_NOT_FOUND so the builtin gets used instead.
+     */
+    if (wow64_using_32bit_prefix && !wcscmp(search, L"win32u.dll"))
+        return STATUS_DLL_NOT_FOUND;
 
     if (!paths) paths = default_load_path;
     len = wcslen( paths );
@@ -3391,6 +4009,17 @@ NTSTATUS WINAPI __wine_ctrl_routine( void *arg )
 {
     DWORD ret = pCtrlRoutine ? pCtrlRoutine( arg ) : 0;
     RtlExitUserThread( ret );
+}
+
+
+/***********************************************************************
+ *              __wine_unix_call
+ *
+ * CW HACK 22435: Needed by D3DMetal PE DLLs
+ */
+NTSTATUS WINAPI __wine_unix_call_exported( unixlib_handle_t handle, unsigned int code, void *args )
+{
+    return __wine_unix_call( handle, code, args );
 }
 
 
@@ -3958,6 +4587,10 @@ void WINAPI LdrShutdownThread(void)
     if ((pointers = NtCurrentTeb()->ThreadLocalStoragePointer))
     {
         NtCurrentTeb()->ThreadLocalStoragePointer = NULL;
+#ifdef __x86_64__  /* macOS-specific hack */
+        if (NtCurrentTeb()->Instrumentation[0])
+            ((TEB *)NtCurrentTeb()->Instrumentation[0])->ThreadLocalStoragePointer = NULL;
+#endif
         for (i = 0; i < tls_module_count; i++) RtlFreeHeap( GetProcessHeap(), 0, pointers[i] );
         RtlFreeHeap( GetProcessHeap(), 0, pointers );
     }
@@ -4166,6 +4799,7 @@ static void load_global_options(void)
 {
     OBJECT_ATTRIBUTES attr;
     UNICODE_STRING bootstrap_mode_str = RTL_CONSTANT_STRING( L"WINEBOOTSTRAPMODE" );
+    UNICODE_STRING wow6432bit_prefix_mode_str = RTL_CONSTANT_STRING( L"WINEWOW6432BPREFIXMODE" );
     UNICODE_STRING session_manager_str =
         RTL_CONSTANT_STRING( L"\\Registry\\Machine\\System\\CurrentControlSet\\Control\\Session Manager" );
     UNICODE_STRING val_str;
@@ -4174,6 +4808,10 @@ static void load_global_options(void)
     val_str.MaximumLength = 0;
     is_prefix_bootstrap =
         RtlQueryEnvironmentVariable_U( NULL, &bootstrap_mode_str, &val_str ) != STATUS_VARIABLE_NOT_FOUND;
+
+    val_str.MaximumLength = 0;
+    wow64_using_32bit_prefix =
+        RtlQueryEnvironmentVariable_U( NULL, &wow6432bit_prefix_mode_str, &val_str ) != STATUS_VARIABLE_NOT_FOUND;
 
     InitializeObjectAttributes( &attr, &session_manager_str, OBJ_CASE_INSENSITIVE, 0, NULL );
     if (!NtOpenKey( &hkey, KEY_QUERY_VALUE, &attr ))
@@ -4310,7 +4948,21 @@ static void init_wow64( CONTEXT *context )
         build_wow64_main_module();
         build_ntdll_module();
 
-        if ((status = load_dll( NULL, wow64_path, 0, &wm, FALSE )))
+        /* CW HACK 20810: In Wow64/32-bit-bottle mode, load by name rather than full path */
+        if (wow64_using_32bit_prefix)
+        {
+            RTL_USER_PROCESS_PARAMETERS *params = NtCurrentTeb()->Peb->ProcessParameters;
+            static const WCHAR wow64_dll[] = L"wow64.dll";
+
+            default_load_path = params->DllPath.Buffer;
+            if (!default_load_path)
+                get_dll_load_path( params->ImagePathName.Buffer, NULL, dll_safe_mode, &default_load_path );
+            status = load_dll( NULL, wow64_dll, 0, &wm, FALSE );
+        }
+        else
+            status = load_dll( NULL, wow64_path, 0, &wm, FALSE );
+
+        if (status)
         {
             ERR( "could not load %s, status %lx\n", debugstr_w(wow64_path), status );
             NtTerminateProcess( GetCurrentProcess(), status );
@@ -4401,6 +5053,18 @@ static void release_address_space(void)
 #endif
 }
 
+#if defined(__x86_64__) && !defined(__arm64ec__)
+extern void CDECL wine_get_host_version( const char **sysname, const char **release );
+
+static BOOL is_macos(void)
+{
+    const char *sysname;
+
+    wine_get_host_version( &sysname, NULL );
+    return !strcmp( sysname, "Darwin" );
+}
+#endif
+
 /******************************************************************
  *		loader_init
  *
@@ -4426,13 +5090,23 @@ void loader_init( CONTEXT *context, void **entry )
         WINE_MODREF *kernel32;
         PEB *peb = NtCurrentTeb()->Peb;
         unsigned int i;
+        WCHAR env_str[16];
+        ULONG heap_flags = HEAP_GROWABLE;
 
         peb->LdrData            = &ldr;
         peb->FastPebLock        = &peb_lock;
         peb->TlsBitmap          = &tls_bitmap;
         peb->TlsExpansionBitmap = &tls_expansion_bitmap;
         peb->LoaderLock         = &loader_section;
-        peb->ProcessHeap        = RtlCreateHeap( HEAP_GROWABLE, NULL, 0, 0, NULL, NULL );
+
+        /* CW Hack 23394, 23427 */
+        if (get_env( L"WINE_HEAP_ZERO_MEMORY", env_str, sizeof(env_str)) && env_str[0] == L'1')
+        {
+            ERR( "Enabling heap zero hack.\n" );
+            heap_flags |= HEAP_ZERO_MEMORY;
+        }
+
+        peb->ProcessHeap        = RtlCreateHeap( heap_flags, NULL, 0, 0, NULL, NULL );
 
         RtlInitializeBitMap( &tls_bitmap, peb->TlsBitmapBits, sizeof(peb->TlsBitmapBits) * 8 );
         RtlInitializeBitMap( &tls_expansion_bitmap, peb->TlsExpansionBitmapBits,
@@ -4509,6 +5183,24 @@ void loader_init( CONTEXT *context, void **entry )
 
         wm = get_modref( NtCurrentTeb()->Peb->ImageBaseAddress );
     }
+
+#if defined(__x86_64__) && !defined(__arm64ec__)
+        if (is_macos() && !NtCurrentTeb()->WowTebOffset)
+        {
+            /* CW HACK 18756 */
+            /* Preallocate TlsExpansionSlots.  Otherwise, kernelbase will
+               allocate it on demand, but won't be able to do the Mac-specific poking to the
+               %gs-relative address. */
+            if (!NtCurrentTeb()->TlsExpansionSlots)
+                NtCurrentTeb()->TlsExpansionSlots = RtlAllocateHeap( GetProcessHeap(), HEAP_ZERO_MEMORY, 8 * sizeof(NtCurrentTeb()->Peb->TlsExpansionBitmapBits) * sizeof(void*) );
+            __asm__ volatile ("movq %0,%%gs:%c1"
+                              :
+                              : "r" (NtCurrentTeb()->TlsExpansionSlots), "n" (FIELD_OFFSET(TEB, TlsExpansionSlots)));
+
+            if (!attach_done) /* only the first time */
+                while (RtlFindClearBitsAndSet(NtCurrentTeb()->Peb->TlsBitmap, 1, 1) != ~0U);
+        }
+#endif
 
     NtCurrentTeb()->FlsSlots = fls_alloc_data();
 

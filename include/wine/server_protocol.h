@@ -5999,6 +5999,8 @@ struct get_inproc_sync_fd_reply
     struct reply_header __header;
     int           type;
     unsigned int access;
+    unsigned int shm_idx;
+    char __pad_20[4];
 };
 
 
@@ -7093,6 +7095,6 @@ union generic_reply
     struct d3dkmt_mutex_release_reply d3dkmt_mutex_release_reply;
 };
 
-#define SERVER_PROTOCOL_VERSION 930
+#define SERVER_PROTOCOL_VERSION 1809
 
 #endif /* __WINE_WINE_SERVER_PROTOCOL_H */

@@ -190,6 +190,8 @@ extern USHORT *uctable;
 extern USHORT *lctable;
 extern SIZE_T startup_info_size;
 extern BOOL is_prefix_bootstrap;
+extern BOOL wow64_using_32bit_prefix;
+extern SECTION_IMAGE_INFORMATION main_image_info;
 extern int main_argc;
 extern char **main_argv;
 extern WCHAR **main_wargv;
@@ -204,13 +206,15 @@ extern sigset_t server_block_set;
 extern pthread_mutex_t fd_cache_mutex;
 extern struct _KUSER_SHARED_DATA *user_shared_data;
 
+extern BOOL simulate_writecopy;
+
 extern void init_environment(void);
 extern void init_startup_info(void);
 extern void *create_startup_info( const UNICODE_STRING *nt_image, ULONG process_flags,
                                   const RTL_USER_PROCESS_PARAMETERS *params,
                                   const struct pe_image_info *pe_info, DWORD *info_size );
 extern char *get_alternate_wineloader( WORD machine );
-extern NTSTATUS exec_wineloader( char **argv, int socketfd, const struct pe_image_info *pe_info );
+extern NTSTATUS exec_wineloader( char **argv, int socketfd, const struct pe_image_info *pe_info, const char *image_path );
 extern NTSTATUS load_builtin( const struct pe_image_info *image_info, UNICODE_STRING *nt_name,
                               ANSI_STRING *exp_name, USHORT machine, SECTION_IMAGE_INFORMATION *info,
                               void **module, SIZE_T *size, ULONG_PTR limit_low, ULONG_PTR limit_high, off_t offset );
@@ -592,6 +596,45 @@ static inline NTSTATUS map_section( HANDLE mapping, void **ptr, SIZE_T *size, UL
     return NtMapViewOfSection( mapping, NtCurrentProcess(), ptr, user_space_wow_limit,
                                0, NULL, size, ViewShare, 0, protect );
 }
+
+/* CX Hack 23015 */
+#if defined(__APPLE__) && defined(__x86_64__)
+#include <wine/asm.h>
+
+extern void *libd3dshared_load_addr, *libd3dshared_code_end;
+
+#define GPT_IMPORT(name) sysv_##name
+#define GPT_ABI_WRAPPER(name) \
+    asm(".text\n\t" \
+        ".align 4\n\t" \
+        ".globl " __ASM_NAME(#name) "\n\t" \
+        __ASM_NAME(#name) ":\n\t" \
+        /* Using rax for scratch to fetch externs, rcx for return address. */ \
+        "push %rax\n\t" \
+        "push %rcx\n\t" \
+        "movq " __ASM_NAME("libd3dshared_load_addr") "@GOTPCREL(%rip), %rax\n\t" \
+        /* Always use the sysv version if we didn't load libd3dshared. */ \
+        "cmpq $0, (%rax)\n\t" \
+        "je " __ASM_LOCAL_LABEL("jmp_sysv_" #name) "\n\t" \
+        /* Is the return address (rsp+16) inside libd3dshared? */ \
+        "movq 16(%rsp), %rcx\n\t" \
+        "cmpq (%rax), %rcx\n\t" \
+        "jb " __ASM_LOCAL_LABEL("jmp_sysv_" #name) "\n\t" \
+        "movq " __ASM_NAME("libd3dshared_code_end") "@GOTPCREL(%rip), %rax\n\t" \
+        "cmpq (%rax), %rcx\n\t" \
+        "ja " __ASM_LOCAL_LABEL("jmp_sysv_" #name) "\n\t" \
+        /* Yes; use the ms_abi thunk. */ \
+        "pop %rcx\n\t" \
+        "pop %rax\n\t" \
+        "jmp " __ASM_NAME("msthunk_" #name) "\n\t" \
+        /* No; use sysv. */ \
+        __ASM_LOCAL_LABEL("jmp_sysv_" #name) ":\n\t" \
+        "pop %rcx\n\t" \
+        "pop %rax\n\t" \
+        "jmp " __ASM_NAME("sysv_" #name) "\n\t" );
+#else
+#define GPT_IMPORT(name) name
+#endif
 
 /* LDT definitions */
 

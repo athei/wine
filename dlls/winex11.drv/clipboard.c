@@ -1560,6 +1560,53 @@ static UINT *get_clipboard_formats( UINT *size )
     return ids;
 }
 
+/* CROSSOVER HACK: bug 5027 - OLE clipboard doesn't work across servers */
+static int is_local_format( UINT format )
+{
+    static const WCHAR DataObject[] = {'D','a','t','a','O','b','j','e','c','t',0};
+    static const WCHAR WineMarshalledDataObject[] = {'W','i','n','e',' ','M','a','r','s','h','a','l','l','e','d',' ','D','a','t','a','O','b','j','e','c','t',0};
+    static const WCHAR OlePrivateData[] = {'O','l','e',' ','P','r','i','v','a','t','e',' ','D','a','t','a',0};
+    static const WCHAR EmbedSource[] = {'E','m','b','e','d',' ','S','o','u','r','c','e',0};
+    static const WCHAR EmbeddedObject[] = {'E','m','b','e','d','d','e','d',' ','O','b','j','e','c','t',0};
+    static const WCHAR LinkSource[] = {'L','i','n','k',' ','S','o','u','r','c','e',0};
+    static const WCHAR CustomLinkSource[] = {'C','u','s','t','o','m',' ','L','i','n','k',' ','S','o','u','r','c','e',0};
+    static const WCHAR ObjectDescriptor[] = {'O','b','j','e','c','t',' ','D','e','s','c','r','i','p','t','o','r',0};
+    static const WCHAR LinkSourceDescriptor[] = {'L','i','n','k',' ','S','o','u','r','c','e',' ','D','e','s','c','r','i','p','t','o','r',0};
+    static const WCHAR OwnerLink[] = {'O','w','n','e','r','L','i','n','k',0};
+    static const WCHAR FileName[] = {'F','i','l','e','N','a','m','e',0};
+    static const WCHAR OfficeArt[] = {'+','O','f','f','i','c','e',' ','A','r','t',0};
+    static const WCHAR* local_formats[] = {
+        DataObject,
+        WineMarshalledDataObject,
+        OlePrivateData,
+        EmbedSource,
+        EmbeddedObject,
+        LinkSource,
+        CustomLinkSource,
+        ObjectDescriptor,
+        LinkSourceDescriptor,
+        OwnerLink,
+        FileName,
+        NULL};
+    int i;
+    WCHAR buffer[256];
+
+    NtUserGetClipboardFormatName( format, buffer, 256 );
+    for (i=0; local_formats[i]; i++)
+        if (wcscmp(buffer, local_formats[i]) == 0)
+            return TRUE;
+
+    for (i=0; buffer[i]; i++)
+        if (buffer[i] == '+')
+        {
+            if (wcscmp(&buffer[i], OfficeArt) == 0)
+                return TRUE;
+            break;
+        }
+
+    return FALSE;
+}
+
 
 /***********************************************************************
  *           is_format_available
@@ -1598,6 +1645,7 @@ static BOOL export_targets( Display *display, Window win, Atom prop, Atom target
     LIST_FOR_EACH_ENTRY( format, &format_list, struct clipboard_format, entry )
     {
         if (!format->export) continue;
+        if (is_local_format( format->id )) continue;
         /* formats with id==0 are always exported */
         if (format->id && !is_format_available( format->id, formats, count )) continue;
         TRACE( "%d: %s -> %s\n", pos, debugstr_format( format->id ), debugstr_xatom( format->atom ));

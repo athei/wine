@@ -387,11 +387,10 @@ static void WINAPI query_symbol_file_callback( TP_CALLBACK_INSTANCE *instance, v
     IoCompleteRequest( irp, IO_NO_INCREMENT );
 }
 
-/* NT APC called from Unix side to add/remove devices */
-static void CALLBACK device_op( ULONG_PTR arg1, ULONG_PTR arg2, ULONG_PTR arg3 )
+static void device_op( void )
 {
     struct device_info info;
-    struct dequeue_device_op_params params = { arg1, &info };
+    struct dequeue_device_op_params params = { &info };
 
     if (MOUNTMGR_CALL( dequeue_device_op, &params )) return;
 
@@ -554,14 +553,13 @@ static NTSTATUS WINAPI mountmgr_ioctl( DEVICE_OBJECT *device, IRP *irp )
 
 static DWORD WINAPI device_op_thread( void *arg )
 {
-    for (;;) SleepEx( INFINITE, TRUE );  /* wait for APCs */
+    for (;;) device_op();
     return 0;
 }
 
 static DWORD WINAPI run_loop_thread( void *arg )
 {
-    struct run_loop_params params = {.op_thread = arg, .op_apc = device_op};
-    return MOUNTMGR_CALL( run_loop, &params );
+    return MOUNTMGR_CALL( run_loop, NULL );
 }
 
 

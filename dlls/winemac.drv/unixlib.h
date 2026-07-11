@@ -41,6 +41,9 @@ struct init_params
     struct localized_string *strings;
     UINT64 app_icon_callback;
     UINT64 app_quit_request_callback;
+    UINT64 regcreateopenkeyexa_callback;
+    UINT64 regqueryvalueexa_callback;
+    UINT64 regsetvalueexa_callback;
 };
 
 /* macdrv_quit_result params */
@@ -71,6 +74,49 @@ struct dnd_query_exited_params
 {
     struct dispatch_callback_params dispatch;
     UINT32 hwnd;
+};
+
+/* macdrv_regcreateopenkeyexa params */
+struct regcreateopenkeyexa_params
+{
+    struct dispatch_callback_params dispatch;
+    UINT32 create;
+    UINT32 hkey;
+    UINT64 name;
+    UINT32 reserved;
+    UINT64 class;
+    UINT32 options;
+    UINT32 access;
+    UINT64 security;
+    UINT64 retkey;
+    UINT64 disposition;
+    UINT32 result;
+};
+
+/* macdrv_regqueryvalueexa params */
+struct regqueryvalueexa_params
+{
+    struct dispatch_callback_params dispatch;
+    UINT32 hkey;
+    UINT64 name;
+    UINT64 reserved;
+    UINT64 type;
+    UINT64 data;
+    UINT64 count;
+    UINT32 result;
+};
+
+/* macdrv_regsetvalueexa params */
+struct regsetvalueexa_params
+{
+    struct dispatch_callback_params dispatch;
+    UINT32 hkey;
+    UINT64 name;
+    UINT32 reserved;
+    UINT32 type;
+    UINT64 data;
+    UINT32 count;
+    UINT32 result;
 };
 
 static inline void *param_ptr(UINT64 param)

@@ -66,6 +66,12 @@ struct unwind_builtin_dll_params
     CONTEXT                    *context;
 };
 
+struct pe_module_loaded_params
+{
+    void *start;
+    void *end;
+};
+
 enum ntdll_unix_funcs
 {
     unix_load_so_dll,
@@ -76,6 +82,9 @@ enum ntdll_unix_funcs
     unix_wine_server_handle_to_fd,
     unix_wine_spawnvp,
     unix_system_time_precise,
+#if defined(__x86_64__)
+    unix_pe_module_loaded,
+#endif
 };
 
 extern unixlib_handle_t __wine_unixlib_handle;

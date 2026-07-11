@@ -1,7 +1,7 @@
 MODULE    = winemac.drv
 UNIXLIB   = winemac.so
 IMPORTS   = uuid rpcrt4 user32 gdi32 win32u
-DELAYIMPORTS = ole32 shell32 imm32
+DELAYIMPORTS = advapi32 ole32 shell32 imm32
 UNIX_LIBS    = \
 	-lwin32u \
 	-framework AppKit \
@@ -21,10 +21,13 @@ SOURCES = \
 	cocoa_cursorclipping.m \
 	cocoa_display.m \
 	cocoa_event.m \
+	cocoa_icon_utils.m \
 	cocoa_main.m \
 	cocoa_opengl.m \
 	cocoa_status_item.m \
 	cocoa_window.m \
+	d3dmetal.c \
+	d3dmetal_objc.m \
 	display.c \
 	dllmain.c \
 	event.c \

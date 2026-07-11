@@ -917,6 +917,9 @@ static BOOL unpack_message( HWND hwnd, UINT message, WPARAM *wparam, LPARAM *lpa
         memcpy( &ps->hook, &h_extra, sizeof(h_extra) );
         break;
     }
+    case WM_WINE_FLUSHSHMSURFACE: /* CX HACK 23950 */
+        minsize = sizeof(struct flush_shm_surface_params);
+        break;
     case CB_GETCOMBOBOXINFO:
     {
         COMBOBOXINFO cbi = { sizeof(COMBOBOXINFO) };
@@ -1286,6 +1289,9 @@ static size_t pack_message( HWND hwnd, UINT message, WPARAM wparam, LPARAM lpara
         push_data( data, (LPVOID)h_extra->lparam, sizeof(MSLLHOOKSTRUCT) );
         return 0;
     }
+    case WM_WINE_FLUSHSHMSURFACE: /* CX HACK 23950 */
+        push_data( data, (struct flush_shm_surface_params *)lparam, sizeof(struct flush_shm_surface_params) );
+        return 0;
     case WM_NCPAINT:
         if (wparam <= 1) return 0;
         FIXME( "WM_NCPAINT hdc packing not supported yet\n" );
@@ -2265,6 +2271,9 @@ static LRESULT handle_internal_message( HWND hwnd, UINT msg, WPARAM wparam, LPAR
         info.dwHoverTime = lparam;
         return NtUserTrackMouseEvent( &info );
     }
+    case WM_WINE_FLUSHSHMSURFACE: /* CX HACK 23950 */
+        process_surface_message( (struct flush_shm_surface_params *)lparam );
+        return 1;
     default:
         if (msg >= WM_WINE_FIRST_DRIVER_MSG && msg <= WM_WINE_LAST_DRIVER_MSG)
             return user_driver->pWindowMessage( hwnd, msg, wparam, lparam );
@@ -2552,6 +2561,32 @@ static BOOL process_keyboard_message( MSG *msg, UINT hw_id, HWND hwnd_filter,
     return TRUE;
 }
 
+static WORD pointer_buttons_from_mouse_buttons( WORD mouse_flags )
+{
+    static const struct
+    {
+        WORD mouse_flag;
+        WORD pointer_flag;
+    }
+    flags[] =
+    {
+        { MK_LBUTTON, POINTER_MESSAGE_FLAG_FIRSTBUTTON },
+        { MK_RBUTTON, POINTER_MESSAGE_FLAG_SECONDBUTTON },
+        { MK_MBUTTON, POINTER_MESSAGE_FLAG_THIRDBUTTON },
+        { MK_XBUTTON1, POINTER_MESSAGE_FLAG_FOURTHBUTTON },
+        { MK_XBUTTON2, POINTER_MESSAGE_FLAG_FIFTHBUTTON },
+    };
+
+    WORD pointer_flags = 0;
+    unsigned int i;
+
+    for (i = 0; i < ARRAY_SIZE(flags); ++i)
+    {
+        if (mouse_flags & flags[i].mouse_flag) pointer_flags |= flags[i].pointer_flag;
+    }
+    return pointer_flags;
+}
+
 /***********************************************************************
  *          process_mouse_message
  *
@@ -2604,6 +2639,56 @@ static BOOL process_mouse_message( MSG *msg, UINT hw_id, ULONG_PTR extra_info, H
 
     msg->pt = point_phys_to_win_dpi( msg->hwnd, msg->pt );
     set_thread_dpi_awareness_context( get_window_dpi_awareness_context( msg->hwnd ));
+
+    if ((extra_info & 0xffffff00) != 0xff515700 && is_mouse_in_pointer_enabled( msg->hwnd ))
+    {
+        WORD flags = POINTER_MESSAGE_FLAG_INRANGE, pointer_button_flags;
+        DWORD message = 0;
+
+        pointer_button_flags = pointer_buttons_from_mouse_buttons( LOWORD( msg->wParam ));
+        if (pointer_button_flags) flags |= pointer_button_flags | POINTER_MESSAGE_FLAG_INCONTACT;
+
+        switch (msg->message)
+        {
+        case WM_MOUSEMOVE:
+            message = WM_POINTERUPDATE;
+            if (!pointer_button_flags) flags |= POINTER_MESSAGE_FLAG_PRIMARY;
+            break;
+        case WM_LBUTTONDOWN:
+        case WM_RBUTTONDOWN:
+        case WM_MBUTTONDOWN:
+        case WM_XBUTTONDOWN:
+            if (pointer_button_flags & (pointer_button_flags - 1))
+            {
+                /* More than one flag in pointer_button_flags, some buttons were already pressed.
+                 * WM_POINTERDOWN is only sent on the first button press. */
+                message = WM_POINTERUPDATE;
+            }
+            else
+            {
+                message = WM_POINTERDOWN;
+                flags |= POINTER_MESSAGE_FLAG_PRIMARY;
+            }
+            break;
+        case WM_LBUTTONUP:
+        case WM_RBUTTONUP:
+        case WM_MBUTTONUP:
+        case WM_XBUTTONUP:
+            /* WM_POINTERUP is only sent once all the buttons are up. */
+            message = pointer_button_flags ? WM_POINTERUPDATE : WM_POINTERUP;
+            break;
+        case WM_MOUSEWHEEL:
+            message = WM_POINTERWHEEL;
+            flags = HIWORD( msg->wParam );
+            break;
+        case WM_MOUSEHWHEEL:
+            message = WM_POINTERHWHEEL;
+            flags = HIWORD( msg->wParam );
+            break;
+        }
+
+        if (message) send_message( msg->hwnd, message, MAKELONG( 1, flags ), MAKELONG( msg->pt.x, msg->pt.y ) );
+    }
 
     /* FIXME: is this really the right place for this hook? */
     event.message = msg->message;
@@ -3129,6 +3214,15 @@ static int peek_message( MSG *msg, const struct peek_message_filter *filter )
             if (info.msg.message == WM_TIMER || info.msg.message == WM_SYSTIMER)
             {
                 if (!(flags & PM_NOYIELD) && idle_event) NtSetEvent( idle_event, NULL );
+            }
+            /* CXHACK 19488 */
+            if (info.msg.message == WM_PAINT &&
+                    flags == (PM_REMOVE | PM_QS_INPUT | PM_QS_POSTMESSAGE | PM_QS_PAINT | PM_QS_SENDMESSAGE) &&
+                    (get_window_long( info.msg.hwnd, GWL_EXSTYLE ) & WS_EX_COMPOSITED ))
+            {
+                send_message( info.msg.hwnd, info.msg.message, info.msg.wParam, info.msg.lParam );
+                flags &= ~PM_QS_PAINT;
+                continue;
             }
             *msg = info.msg;
             msg->pt = point_phys_to_win_dpi( info.msg.hwnd, info.msg.pt );

@@ -30,6 +30,25 @@
 
 #pragma GCC diagnostic ignored "-Wdeclaration-after-statement"
 
+/* CrossOver Hack #20512 */
+@interface NSScreen (SafeAreaInsetsForOldSDKs)
+/* Defining this selector for compiling against older SDKs. */
+@property (readonly) NSEdgeInsets safeAreaInsets API_AVAILABLE(macos(12.0));
+@end
+
+static BOOL needs_skyrim_se_launcher_hack(void)
+{
+    static BOOL did_check = FALSE, needs_hack;
+    if (!did_check)
+    {
+        did_check = TRUE;
+        needs_hack = is_apple_silicon() && is_skyrim_se_launcher();
+    }
+
+    return needs_hack;
+}
+/* End hack. */
+
 static uint64_t dedicated_gpu_id;
 static uint64_t integrated_gpu_id;
 

@@ -21,6 +21,9 @@
 /* Define to 1 if you have the <asm/user.h> header file. */
 #undef HAVE_ASM_USER_H
 
+/* Define to 1 if you have the <AVFoundation/AVFoundation.h> header file. */
+#undef HAVE_AVFOUNDATION_AVFOUNDATION_H
+
 /* Define to 1 if you have the <bluetooth/bluetooth.h> header file. */
 #undef HAVE_BLUETOOTH_BLUETOOTH_H
 
@@ -110,6 +113,12 @@
 
 /* Define to 1 if you have the <inttypes.h> header file. */
 #undef HAVE_INTTYPES_H
+
+/* Define to 1 if you have the <IOKit/usb/IOUSBLib.h> header file. */
+#undef HAVE_IOKIT_USB_IOUSBLIB_H
+
+/* Define to 1 if you have the 'IOServiceMatching' function. */
+#undef HAVE_IOSERVICEMATCHING
 
 /* Define to 1 if you have the 'kqueue' function. */
 #undef HAVE_KQUEUE
@@ -333,6 +342,9 @@
 /* Define to 1 if you have the 'posix_fallocate' function. */
 #undef HAVE_POSIX_FALLOCATE
 
+/* Define to 1 if you have the 'ppoll' function. */
+#undef HAVE_PPOLL
+
 /* Define to 1 if you have the 'prctl' function. */
 #undef HAVE_PRCTL
 
@@ -392,6 +404,9 @@
 
 /* Define to 1 if 'interface_id' is a member of 'sg_io_hdr_t'. */
 #undef HAVE_SG_IO_HDR_T_INTERFACE_ID
+
+/* Define to 1 if you have the `shm_open' function. */
+#undef HAVE_SHM_OPEN
 
 /* Define to 1 if 'si_fd' is a member of 'siginfo_t'. */
 #undef HAVE_SIGINFO_T_SI_FD
@@ -521,6 +536,9 @@
 
 /* Define to 1 if you have the <sys/epoll.h> header file. */
 #undef HAVE_SYS_EPOLL_H
+
+/* Define to 1 if you have the <sys/eventfd.h> header file. */
+#undef HAVE_SYS_EVENTFD_H
 
 /* Define to 1 if you have the <sys/event.h> header file. */
 #undef HAVE_SYS_EVENT_H

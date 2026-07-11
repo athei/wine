@@ -30,6 +30,7 @@
 #include "ntgdi_private.h"
 #include "win32u_private.h"
 #include "ntuser_private.h"
+#include "d3dkmdt.h"
 
 #include <d3d9types.h>
 #include <dxgi.h>
@@ -710,6 +711,24 @@ NTSTATUS WINAPI NtGdiDdDDIQueryAdapterInfo( D3DKMT_QUERYADAPTERINFO *desc )
 
         *value = KMT_DRIVERVERSION_WDDM_1_3;
         return STATUS_SUCCESS;
+    }
+    /* CW HACK 24905 */
+    case KMTQAITYPE_WDDM_2_7_CAPS:
+    {
+        D3DKMT_WDDM_2_7_CAPS *caps = desc->pPrivateDriverData;
+        char *active_gfx_backend = getenv("CX_ACTIVE_GRAPHICS_BACKEND");
+
+        if (desc->PrivateDriverDataSize < sizeof(*caps))
+            return STATUS_INVALID_PARAMETER;
+
+        if (active_gfx_backend && !strcmp(active_gfx_backend, "d3dmetal"))
+        {
+            caps->HwSchEnabled = 1;
+            caps->HwSchSupported = 1;
+            caps->HwSchEnabledByDefault = 1;
+            return STATUS_SUCCESS;
+        }
+        /* fallthrough */
     }
     default:
     {

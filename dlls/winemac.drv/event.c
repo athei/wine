@@ -46,7 +46,9 @@ static const char *dbgstr_event(int type)
         "APP_ACTIVATED",
         "APP_DEACTIVATED",
         "APP_QUIT_REQUESTED",
+        "CLIENT_SURFACE_PRESENTED", /* CW HACK 22435 */
         "DISPLAYS_CHANGED",
+        "EDIT_MENU_COMMAND", /* CrossOver Hack 10912: Mac Edit menu */
         "HOTKEY_PRESS",
         "IM_SET_TEXT",
         "KEY_PRESS",
@@ -98,6 +100,8 @@ static macdrv_event_mask get_event_mask(DWORD mask)
 
     if (mask & QS_KEY)
     {
+        /* CrossOver Hack 10912: Mac Edit menu */
+        event_mask |= event_mask_for_type(EDIT_MENU_COMMAND);
         event_mask |= event_mask_for_type(KEY_PRESS);
         event_mask |= event_mask_for_type(KEY_RELEASE);
         event_mask |= event_mask_for_type(KEYBOARD_CHANGED);
@@ -120,6 +124,7 @@ static macdrv_event_mask get_event_mask(DWORD mask)
         event_mask |= event_mask_for_type(APP_ACTIVATED);
         event_mask |= event_mask_for_type(APP_DEACTIVATED);
         event_mask |= event_mask_for_type(APP_QUIT_REQUESTED);
+        event_mask |= event_mask_for_type(CLIENT_SURFACE_PRESENTED); /* CW HACK 22435 */
         event_mask |= event_mask_for_type(DISPLAYS_CHANGED);
         event_mask |= event_mask_for_type(IM_SET_TEXT);
         event_mask |= event_mask_for_type(LOST_PASTEBOARD_OWNERSHIP);
@@ -394,8 +399,15 @@ void macdrv_handle_event(const macdrv_event *event)
     case APP_QUIT_REQUESTED:
         macdrv_app_quit_requested(event);
         break;
+    case CLIENT_SURFACE_PRESENTED:    /* CW HACK 22435 */
+	macdrv_client_surface_presented(event);
+	break;
     case DISPLAYS_CHANGED:
         macdrv_displays_changed(event);
+        break;
+    /* CrossOver Hack 10912: Mac Edit menu */
+    case EDIT_MENU_COMMAND:
+        macdrv_edit_menu_command(event);
         break;
     case HOTKEY_PRESS:
         macdrv_hotkey_press(event);

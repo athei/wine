@@ -55,6 +55,9 @@ extern void move_window_bits_surface( HWND hwnd, const RECT *window_rect, struct
 extern void register_window_surface( struct window_surface *old,
                                      struct window_surface *new );
 extern void *window_surface_get_color( struct window_surface *surface, BITMAPINFO *info );
+extern struct window_surface *create_shm_surface( HWND hwnd, HWND parent, const RECT *visible_rect,
+                                                  struct window_surface *old_surface );
+extern void process_surface_message( struct flush_shm_surface_params *params );
 
 /* defwnd.c */
 extern BOOL adjust_window_rect( RECT *rect, DWORD style, BOOL menu, DWORD ex_style, UINT dpi );
@@ -88,6 +91,7 @@ extern void unregister_imm_window( HWND hwnd );
 /* input.c */
 extern BOOL grab_pointer;
 extern BOOL grab_fullscreen;
+extern BOOL is_mouse_in_pointer_enabled( HWND hwnd );
 extern HWND get_active_window(void);
 extern HWND get_capture(void);
 extern HWND get_focus(void);

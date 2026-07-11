@@ -3065,6 +3065,18 @@ static void sock_ioctl( struct fd *fd, ioctl_code_t code, struct async *async )
 
         if (unix_addr.addr.sa_family == AF_INET)
         {
+#if defined(__APPLE__)
+            /* CW Hack 24472. macOS does not support binding to any loopback
+             * address other than 127.0.0.1. This is an incomplete and incorrect
+             * rewrite, but it's enough to satisfy GOG Galaxy. */
+            if ((unix_addr.in.sin_addr.s_addr & 0xff) == 127 &&
+                unix_addr.in.sin_addr.s_addr != htonl( INADDR_LOOPBACK ))
+            {
+                fprintf(stderr, "HACK: rewriting bind loopback address to 127.0.0.1\n");
+                bind_addr.in.sin_addr.s_addr = htonl( INADDR_LOOPBACK );
+            }
+#endif
+
             if (!memcmp( &unix_addr.in.sin_addr, magic_loopback_addr, 4 )
                     || bind_to_interface( sock, &unix_addr.in ))
                 bind_addr.in.sin_addr.s_addr = htonl( INADDR_ANY );

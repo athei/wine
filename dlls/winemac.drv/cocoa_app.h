@@ -73,6 +73,8 @@ enum {
     NSMutableDictionary* originalDisplayModes;
     NSMutableDictionary* latentDisplayModes;
     BOOL displaysCapturedForFullscreen;
+    BOOL displaysTemporarilyUncapturedForDialog;
+    BOOL temporarilyIgnoreResignEventsForDialog;
 
     NSArray*    cursorFrames;
     int         cursorFrame;
@@ -88,14 +90,24 @@ enum {
 
     NSImage* applicationIcon;
 
+    /* CW Hack 22310, 24199 */
+    NSString *explicitAppUserModelID;
+    BOOL terminatingDueToExternalRequest;
+
     BOOL beenActive;
 
     NSMutableSet* windowsBeingDragged;
+
+    // CrossOver Hack 10912: Mac Edit menu
+    NSMutableArray* changedKeyEquivalents;
 }
 
 @property (nonatomic) CGEventSourceKeyboardType keyboardType;
 @property (readonly, copy, nonatomic) NSEvent* lastFlagsChanged;
 @property (readonly, nonatomic) BOOL areDisplaysCaptured;
+@property (readonly, nonatomic) BOOL displaysTemporarilyUncapturedForDialog;
+@property (readonly, nonatomic) BOOL temporarilyIgnoreResignEventsForDialog;
+@property (nonatomic, copy) NSString *explicitAppUserModelID;  /* CW Hack 22310 */
 
 @property (readonly) BOOL clippingCursor;
 @property (nonatomic) NSTimeInterval lastSetCursorPositionTime;
@@ -129,6 +141,9 @@ enum {
 
     - (BOOL) handleEvent:(NSEvent*)anEvent;
     - (void) didSendEvent:(NSEvent*)anEvent;
+
+    // CrossOver Hack 10912: Mac Edit menu
+    - (BOOL) isEditMenuAction:(SEL)selector;
 
 @end
 

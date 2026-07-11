@@ -736,6 +736,10 @@ HKLM,SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x86,"Version",2,"14.42.344
 [FakeDllsWin64]
 10,twain_64,sane.ds
 10,twain_64,gphoto2.ds
+; CW HACK 22435: fake DLLs for D3DMetal
+11,,atidxx64.dll,*
+11,,nvapi64.dll,*
+11,,nvngx.dll,*
 
 ; Wow64-only fake dlls
 [FakeDllsWow64]
@@ -1099,7 +1103,7 @@ StartType=3
 ErrorControl=1
 
 [Services]
-HKLM,%CurrentVersion%\RunServices,"winemenubuilder",2,"%11%\winemenubuilder.exe -a -r"
+;(cw)HKLM,%CurrentVersion%\RunServices,"winemenubuilder",2,"%11%\winemenubuilder.exe -a -r"
 HKLM,"System\CurrentControlSet\Services\Dnscache\Parameters",,16
 HKLM,"System\CurrentControlSet\Services\Eventlog\Application",,16
 HKLM,"System\CurrentControlSet\Services\Eventlog\System","Sources",0x10000,""

@@ -781,6 +781,18 @@ NTSTATUS WINAPI wow64_NtSetLdtEntries( UINT *args )
     ULONG sel2 = get_ulong( &args );
     ULONG64 entry2 = get_ulong64( &args );
 
+    /* CW Hack 26470 & 26456: Rosetta hangs if you try to set a 16-bit LDT */
+    {
+        char buffer[64];
+        NTSTATUS status = NtQuerySystemInformation( SystemProcessorBrandString, buffer, sizeof(buffer), NULL );
+
+        if (!status && strstr( buffer, "VirtualApple" ))
+        {
+            ERR("HACK: not calling NtSetLdtEntries()\n");
+            return STATUS_NOT_IMPLEMENTED;
+        }
+    }
+
     return NtSetLdtEntries( sel1, *(LDT_ENTRY *)&entry1, sel2, *(LDT_ENTRY *)&entry2 );
 }
 

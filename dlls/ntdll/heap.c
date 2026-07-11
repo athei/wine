@@ -168,6 +168,10 @@ C_ASSERT( HEAP_MAX_FREE_BLOCK_SIZE >= HEAP_MAX_BLOCK_REGION_SIZE );
 
 /* minimum size to start allocating large blocks */
 #define HEAP_MIN_LARGE_BLOCK_SIZE  (HEAP_MAX_USED_BLOCK_SIZE - 0x1000)
+/* extra size to add at the end of block for tail checking */
+/* CW HACK 18582: always add a tail to heap allocs to fix Rockstar Launcher installer */
+#define HEAP_TAIL_EXTRA_SIZE(flags) \
+    ALIGNMENT
 
 #define FREE_LIST_LINEAR_BITS 2
 #define FREE_LIST_LINEAR_MASK ((1 << FREE_LIST_LINEAR_BITS) - 1)

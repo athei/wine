@@ -285,13 +285,16 @@ static int error_handler( Display *display, XErrorEvent *error_evt )
                error_evt->error_code, error_evt->request_code );
         return 0;
     }
+    ERR("XERROR: code %d request %d minor %d xid %08lx\n",
+        error_evt->error_code,
+        error_evt->request_code,
+        error_evt->minor_code,
+        error_evt->resourceid);
     if (TRACE_ON(synchronous))
     {
-        ERR( "X protocol error: serial=%ld, request_code=%d - breaking into debugger\n",
-             error_evt->serial, error_evt->request_code );
+        old_error_handler( display, error_evt );
         assert( 0 );
     }
-    old_error_handler( display, error_evt );
     return 0;
 }
 

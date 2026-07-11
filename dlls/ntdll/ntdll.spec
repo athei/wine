@@ -1765,3 +1765,9 @@
 @ cdecl wine_get_version()
 @ cdecl wine_get_build_id()
 @ cdecl wine_get_host_version(ptr ptr)
+
+# CW HACK 14391
+@ stdcall -syscall __wine_rpc_NtReadFile(long long ptr ptr ptr ptr long ptr ptr)
+
+# CW HACK 22435
+@ stdcall __wine_unix_call(int64 long ptr) __wine_unix_call_exported

@@ -1362,6 +1362,8 @@ static BOOL is_hidden_file( const char *name )
     p = name + strlen( name );
     while (p > name && p[-1] == '/') p--;
     while (p > name && p[-1] != '/') p--;
+    /* CrossOver Hack for bug 15207 - hide files starting in ~$ */
+    if (p[0] == '~' && p[1] == '$') return TRUE;
     if (*p++ != '.') return FALSE;
     if (!*p || *p == '/') return FALSE;  /* "." directory */
     if (*p++ != '.') return TRUE;
@@ -3326,16 +3328,31 @@ failed:
 static inline int get_dos_prefix_len( const UNICODE_STRING *name )
 {
     static const WCHAR dosdev_prefixW[] = {'\\','D','o','s','D','e','v','i','c','e','s','\\'};
+    static const WCHAR globalrootW[] = {'\\','?','?','\\','G','l','o','b','a','l','R','o','o','t'};
+    int prefix_len = 0;
+    WCHAR *prefix;
+    USHORT length;
 
-    if (name->Length >= sizeof(nt_prefixW) &&
-        !memcmp( name->Buffer, nt_prefixW, sizeof(nt_prefixW) ))
-        return ARRAY_SIZE( nt_prefixW );
+    prefix = name->Buffer;
+    length = name->Length;
 
-    if (name->Length >= sizeof(dosdev_prefixW) &&
-        !wcsnicmp( name->Buffer, dosdev_prefixW, ARRAY_SIZE( dosdev_prefixW )))
-        return ARRAY_SIZE( dosdev_prefixW );
+    if (length >= ARRAY_SIZE( globalrootW ) &&
+        !wcsnicmp( prefix, globalrootW, ARRAY_SIZE( globalrootW )))
+    {
+        WARN("Stripping off GlobalRoot prefix.\n");
+        prefix += ARRAY_SIZE( globalrootW );
+        prefix_len += ARRAY_SIZE( globalrootW );
+        length -= ARRAY_SIZE( globalrootW );
+    }
 
-    return 0;
+    if (length >= sizeof(nt_prefixW) &&
+        !memcmp( prefix, nt_prefixW, sizeof(nt_prefixW) ))
+        prefix_len += ARRAY_SIZE( nt_prefixW );
+    else if (length >= sizeof(dosdev_prefixW) &&
+        !wcsnicmp( prefix, dosdev_prefixW, ARRAY_SIZE( dosdev_prefixW )))
+        prefix_len += ARRAY_SIZE( dosdev_prefixW );
+
+    return prefix_len;
 }
 
 
@@ -5975,6 +5992,22 @@ static unsigned int set_pending_write( HANDLE device )
     return status;
 }
 
+static BOOL is_quickenpatch(void)
+{
+    static const WCHAR qkn[] = {'q','u','i','c','k','e','n','P','a','t','c','h','.','e','x','e',0};
+    WCHAR *path = NtCurrentTeb()->Peb->ProcessParameters->ImagePathName.Buffer;
+    DWORD len = sizeof(qkn)/sizeof(qkn[0]) - 1, len2 = wcslen(path);
+    return (len <= len2 && !wcsicmp( path + len2 - len, qkn ));
+}
+
+
+/* CW HACK 14391 */
+NTSTATUS WINAPI __wine_rpc_NtReadFile( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, void *apc_user,
+                                IO_STATUS_BLOCK *io, void *buffer, ULONG length,
+                                LARGE_INTEGER *offset, ULONG *key )
+{
+    return NtReadFile( handle, event, apc, apc_user, io, buffer, length, offset, key );
+}
 
 /******************************************************************************
  *              NtReadFile   (NTDLL.@)
@@ -6021,6 +6054,9 @@ NTSTATUS WINAPI NtReadFile( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, vo
             /* async I/O doesn't make sense on regular files */
             while ((result = virtual_locked_pread( unix_handle, buffer, length, offset->QuadPart )) == -1)
             {
+                /* CrossOver hack 14664 */
+                if (errno == EFAULT && is_quickenpatch() && virtual_check_buffer_for_write( buffer, length ))
+                    continue;
                 if (errno != EINTR)
                 {
                     status = errno_to_status( errno );
@@ -6100,6 +6136,9 @@ NTSTATUS WINAPI NtReadFile( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, vo
         else if (errno != EAGAIN)
         {
             if (errno == EINTR) continue;
+            /* CrossOver hack 14664 */
+            if (errno == EFAULT && is_quickenpatch() && virtual_check_buffer_for_write( buffer, length ))
+                continue;
             if (!total) status = errno_to_status( errno );
             goto err;
         }

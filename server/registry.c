@@ -147,6 +147,7 @@ static struct save_branch_info save_branch_info[MAX_SAVE_BRANCH_INFO];
 unsigned int supported_machines_count = 0;
 unsigned short supported_machines[8];
 unsigned short native_machine = 0;
+int wow64_using_32bit_prefix = 0;
 
 /* information about a file being loaded */
 struct file_load_info
@@ -1852,6 +1853,14 @@ static void init_supported_machines(void)
     if (prefix_type == PREFIX_32BIT) supported_machines[count++] = IMAGE_FILE_MACHINE_I386;
 #elif defined(__x86_64__)
     if (prefix_type == PREFIX_64BIT) supported_machines[count++] = IMAGE_FILE_MACHINE_AMD64;
+#ifdef IS_WOW64_BUILD
+    else
+    {
+        supported_machines[count++] = IMAGE_FILE_MACHINE_AMD64;
+        supported_machines[count++] = IMAGE_FILE_MACHINE_I386;
+        wow64_using_32bit_prefix = 1;
+    }
+#endif
     supported_machines[count++] = IMAGE_FILE_MACHINE_I386;
 #elif defined(__arm__)
     if (prefix_type == PREFIX_32BIT) supported_machines[count++] = IMAGE_FILE_MACHINE_ARMNT;

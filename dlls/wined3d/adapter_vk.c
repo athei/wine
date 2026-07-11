@@ -2291,6 +2291,7 @@ static void wined3d_adapter_vk_init_d3d_info(struct wined3d_adapter_vk *adapter_
     struct wined3d_vertex_caps vertex_caps;
     unsigned int sample_counts_mask;
     struct shader_caps shader_caps;
+    bool moltenvk;
 
     get_physical_device_info(adapter_vk, &device_info);
 
@@ -2348,6 +2349,7 @@ static void wined3d_adapter_vk_init_d3d_info(struct wined3d_adapter_vk *adapter_
     d3d_info->clip_control = true;
     d3d_info->full_ffp_varyings = !!(shader_caps.wined3d_caps & WINED3D_SHADER_CAP_FULL_FFP_VARYINGS);
     d3d_info->scaled_resolve = false;
+    d3d_info->multithread_safe = true;
     d3d_info->pbo = true;
     d3d_info->feature_level = feature_level_from_caps(&device_info, &shader_caps);
     d3d_info->subpixel_viewport = true;
@@ -2366,7 +2368,9 @@ static void wined3d_adapter_vk_init_d3d_info(struct wined3d_adapter_vk *adapter_
 
     d3d_info->multisample_draw_location = WINED3D_LOCATION_TEXTURE_RGB;
 
-    vk_info->multiple_viewports = device_info.features2.features.multiViewport;
+    /* HACK: Disable multiple viewports when running with MoltenVK. As of writing, it causes glitches in multiple games. */
+    moltenvk = adapter_vk->driver_properties.driverID == VK_DRIVER_ID_MOLTENVK;
+    if (!moltenvk) vk_info->multiple_viewports = device_info.features2.features.multiViewport;
     vk_info->uav_read_without_format = device_info.features2.features.shaderStorageImageReadWithoutFormat;
     vk_info->dynamic_state2 = device_info.dynamic_state2_features.extendedDynamicState2;
     vk_info->dynamic_patch_vertex_count = device_info.dynamic_state2_features.extendedDynamicState2PatchControlPoints;
@@ -2417,6 +2421,8 @@ static bool wined3d_adapter_vk_init_device_extensions(struct wined3d_adapter_vk 
         {VK_KHR_SAMPLER_YCBCR_CONVERSION_EXTENSION_NAME,    VK_API_VERSION_1_1},
         {VK_KHR_SHADER_DRAW_PARAMETERS_EXTENSION_NAME,      VK_API_VERSION_1_1},
         {VK_KHR_SWAPCHAIN_EXTENSION_NAME,                   ~0u,                true},
+        {VK_EXT_HOST_QUERY_RESET_EXTENSION_NAME,            VK_API_VERSION_1_2},
+        {VK_KHR_DRIVER_PROPERTIES_EXTENSION_NAME,           VK_API_VERSION_1_2},
         /* KHR_synchronization2 is required for KHR_video_queue. */
         {VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME,           ~0u},
         {VK_KHR_VIDEO_DECODE_H264_EXTENSION_NAME,           ~0u},
@@ -2570,11 +2576,31 @@ static BOOL wined3d_adapter_vk_init(struct wined3d_adapter_vk *adapter_vk,
     else
         minmax = NULL;
 
+    memset(&adapter_vk->driver_properties, 0, sizeof(adapter_vk->driver_properties));
+    adapter_vk->driver_properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES;
+    id_properties.pNext = &adapter_vk->driver_properties;
+
     if (vk_info->vk_ops.vkGetPhysicalDeviceProperties2)
         VK_CALL(vkGetPhysicalDeviceProperties2(adapter_vk->physical_device, &properties2));
     else
         VK_CALL(vkGetPhysicalDeviceProperties(adapter_vk->physical_device, &properties2.properties));
     adapter_vk->device_limits = properties2.properties.limits;
+
+    /* CW HACK 18311: Use the Vulkan renderer on macOS for d3d10/11. */
+    if (wined3d_settings.renderer == WINED3D_RENDERER_AUTO)
+    {
+        bool d3d10 = !(wined3d_creation_flags & WINED3D_PIXEL_CENTER_INTEGER);
+        bool moltenvk = adapter_vk->driver_properties.driverID == VK_DRIVER_ID_MOLTENVK;
+
+        if (!moltenvk || !d3d10)
+        {
+            if (!moltenvk)
+                TRACE("Not running on MoltenVK, defaulting to the OpenGL backend.\n");
+            if (!d3d10)
+                TRACE("Application using < d3d10 API, defaulting to the OpenGL backend.\n");
+            goto fail_vulkan;
+        }
+    }
 
     VK_CALL(vkGetPhysicalDeviceMemoryProperties(adapter_vk->physical_device, &adapter_vk->memory_properties));
 

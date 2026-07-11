@@ -405,6 +405,7 @@ static const KBDTABLES kbdus_tables =
 };
 
 static LONG clipping_cursor; /* clipping thread counter */
+static LONG enable_mouse_in_pointer = -1;
 
 BOOL grab_pointer = TRUE;
 BOOL grab_fullscreen = FALSE;
@@ -2608,15 +2609,22 @@ void toggle_caret( HWND hwnd )
     if (ret && !hidden) display_caret( hwnd, &r );
 }
 
-
 /**********************************************************************
  *       NtUserEnableMouseInPointer    (win32u.@)
  */
 BOOL WINAPI NtUserEnableMouseInPointer( BOOL enable )
 {
-    FIXME( "enable %u stub!\n", enable );
-    RtlSetLastWin32Error( ERROR_CALL_NOT_IMPLEMENTED );
-    return FALSE;
+    LONG prev;
+
+    TRACE( "enable %u\n", enable );
+
+    if ((prev = InterlockedCompareExchange( &enable_mouse_in_pointer, !!enable, -1 )) != -1 && prev != enable)
+    {
+        RtlSetLastWin32Error( ERROR_ACCESS_DENIED );
+        return FALSE;
+    }
+
+    return TRUE;
 }
 
 /**********************************************************************
@@ -2634,9 +2642,14 @@ BOOL WINAPI NtUserEnableMouseInPointerForThread( void )
  */
 BOOL WINAPI NtUserIsMouseInPointerEnabled(void)
 {
-    FIXME( "stub!\n" );
-    RtlSetLastWin32Error( ERROR_CALL_NOT_IMPLEMENTED );
-    return FALSE;
+    BOOL ret = ReadNoFence( &enable_mouse_in_pointer ) == 1;
+    TRACE( "-> %d.\n", ret );
+    return ret;
+}
+
+BOOL is_mouse_in_pointer_enabled( HWND hwnd )
+{
+    return ReadNoFence( &enable_mouse_in_pointer ) == 1;
 }
 
 static BOOL is_captured_by_system(void)

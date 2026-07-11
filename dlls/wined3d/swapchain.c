@@ -947,7 +947,13 @@ static HRESULT wined3d_swapchain_vk_create_vulkan_swapchain(struct wined3d_swapc
         goto fail;
     }
 
-    image_count = desc->backbuffer_count;
+    /* For CW bug 18838. Create MoltenVK swapchains with 3 images, as
+     * recommended by the MoltenVK documentation. Performance of full-screen
+     * swapchains is atrocious with the only other supported image count of 2. */
+    if (adapter_vk->driver_properties.driverID == VK_DRIVER_ID_MOLTENVK)
+        image_count = 3;
+    else
+        image_count = desc->backbuffer_count;
     if (image_count < surface_caps.minImageCount)
         image_count = surface_caps.minImageCount;
     else if (surface_caps.maxImageCount && image_count > surface_caps.maxImageCount)
@@ -2000,6 +2006,17 @@ HRESULT CDECL wined3d_swapchain_resize_buffers(struct wined3d_swapchain *swapcha
 
         if (!height)
             height = client_rect.bottom;
+    }
+
+    /* CX HACK 23854 */
+    if (!width || !height)
+    {
+        ERR("Still have a zero dimension after getting the window's client rect: %u x %u; hacking to 1\n", width, height);
+        if (!width)
+            width = 1;
+
+        if (!height)
+            height = 1;
     }
 
     if (width != desc->backbuffer_width || height != desc->backbuffer_height)

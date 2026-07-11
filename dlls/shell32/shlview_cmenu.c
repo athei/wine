@@ -946,6 +946,55 @@ static void DoOpenProperties(ContextMenu *This, HWND hwnd)
 	    FIXME("No property pages found.\n");
 }
 
+/*
+ * CX HACK 14911
+ */
+static void DoCreateLink(ContextMenu *This)
+{
+    IShellLinkW* shelllink;
+    IPersistFile* persistfile;
+    WCHAR wszFilename[MAX_PATH];
+    WCHAR root[MAX_PATH];
+    WCHAR *lnkfile=NULL;
+    LPITEMIDLIST pidlFQ;
+
+    static const WCHAR backslashW[]={'\\','\0'};
+    static const WCHAR lnkW[]={'.','l','n','k','\0'};
+
+    if (!SUCCEEDED(CoCreateInstance( &CLSID_ShellLink, NULL, CLSCTX_INPROC_SERVER,
+                                     &IID_IShellLinkW, (LPVOID*)&shelllink)))
+    {
+        ERR("couldn't create ShellLink object\n");
+        return;
+    }
+    pidlFQ = ILCombine(This->pidl, This->apidl[0]);
+    IShellLinkW_SetIDList(shelllink, pidlFQ);
+    ILFree(pidlFQ);
+    _ILSimpleGetTextW(This->apidl[0], (LPVOID)wszFilename, MAX_PATH);
+
+    SHGetSpecialFolderPathW(NULL, root, CSIDL_STARTMENU, TRUE);
+    lnkfile=HeapAlloc(GetProcessHeap(), 0, (lstrlenW(root)+1+lstrlenW(wszFilename)+5) * sizeof(*lnkfile));
+    lstrcpyW(lnkfile, root);
+    lstrcatW(lnkfile, backslashW);
+    lstrcatW(lnkfile, wszFilename);
+    lstrcatW(lnkfile, lnkW);
+
+    if (!SUCCEEDED(IShellLinkW_QueryInterface(shelllink, &IID_IPersistFile, (LPVOID*)&persistfile)))
+    {
+        ERR("couldn't get IPersistFile interface\n");
+        IShellLinkW_Release(shelllink);
+        HeapFree(GetProcessHeap(), 0, lnkfile);
+        return;
+    }
+    TRACE("writing link to %s\n", wine_dbgstr_w(lnkfile));
+    if (!SUCCEEDED(IPersistFile_Save(persistfile, lnkfile, FALSE)))
+        ERR("couldn't write link to %s\n", wine_dbgstr_w(lnkfile));
+
+    IPersistFile_Release(persistfile);
+    IShellLinkW_Release(shelllink);
+    HeapFree(GetProcessHeap(), 0, lnkfile);
+}
+
 static HRESULT WINAPI ItemMenu_InvokeCommand(
 	IContextMenu3 *iface,
 	LPCMINVOKECOMMANDINFO lpcmi)
@@ -1013,6 +1062,10 @@ static HRESULT WINAPI ItemMenu_InvokeCommand(
         case FCIDM_SHVIEW_PROPERTIES:
             TRACE("Verb FCIDM_SHVIEW_PROPERTIES\n");
             DoOpenProperties(This, lpcmi->hwnd);
+            break;
+        case FCIDM_SHVIEW_CREATELINK: /* CX HACK 14911 */
+            TRACE("Verb FCIDM_SHVIEW_CREATELINK\n");
+            DoCreateLink(This);
             break;
         default:
             FIXME("Unhandled verb %#x.\n", id);

@@ -408,6 +408,30 @@ int wmain(int argc, WCHAR *argv[])
     IUri_GetScheme(uri, &scheme);
 
     if(scheme == URL_SCHEME_FILE) {
+#ifdef __ANDROID__
+        /* on Chrome OS, open HTML in iexplore. Otherwise pass to native browser. */
+        static const WCHAR iexploreW[] = {'i','e','x','p','l','o','r','e','.','e','x','e',0};
+        static const WCHAR htmW[] = {'.','h','t','m',0};
+        static const WCHAR htmlW[] = {'.','h','t','m','l',0};
+
+        BSTR ext = NULL;
+
+        hres = IUri_GetExtension(uri, &ext);
+        if(SUCCEEDED(hres) && ext){
+            if(!strcmpiW(ext, htmW) ||
+                    !strcmpiW(ext, htmlW)){
+                BSTR path = NULL;
+
+                hres = IUri_GetPath(uri, &path);
+                if(SUCCEEDED(hres) && path){
+                    ShellExecuteW(NULL, NULL, iexploreW, path, NULL, SW_SHOW);
+                    return 0;
+                }
+            }
+            SysFreeString(ext);
+        }
+#endif
+
         display_uri = convert_file_uri(uri);
         if(!display_uri) {
             WINE_ERR("Failed to convert file URL to unix path\n");

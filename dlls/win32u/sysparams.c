@@ -6881,6 +6881,31 @@ BOOL WINAPI NtUserSystemParametersInfo( UINT action, UINT val, void *ptr, UINT w
 #undef WINE_SPI_WARN
 }
 
+/* CX HACK 19134 */
+#ifdef __APPLE__
+static BOOL is_star_trek_away_team(void)
+{
+    static const WCHAR star_trekW[] = {'S','t','a','r',' ','T','r','e','k','.','e','x','e',0};
+    WCHAR *module_exe, *name = NtCurrentTeb()->Peb->ProcessParameters->ImagePathName.Buffer;
+
+    module_exe = wcsrchr(name, '\\');
+    module_exe = module_exe ? module_exe + 1 : name;
+    return !wcsicmp(module_exe, star_trekW );
+}
+
+static BOOL needs_mouse_hack(void)
+{
+    static BOOL needs_hack, did_check = FALSE;
+
+    if (!did_check) {
+        needs_hack = is_star_trek_away_team();
+        did_check = TRUE;
+    }
+    return needs_hack;
+}
+#endif
+/* End hack */
+
 int get_system_metrics( int index )
 {
     NONCLIENTMETRICSW ncm;
@@ -6937,6 +6962,10 @@ int get_system_metrics( int index )
     case SM_CYKANJIWINDOW:
         return 0;
     case SM_MOUSEPRESENT:
+        /* CX HACK 19134 */
+#ifdef __APPLE__
+        if (needs_mouse_hack()) return 0;
+#endif
         return 1;
     case SM_DEBUG:
         return 0;
@@ -7842,6 +7871,18 @@ NTSTATUS WINAPI NtUserDisplayConfigGetDeviceInfo( DISPLAYCONFIG_DEVICE_INFO_HEAD
         FIXME( "Unimplemented packet type %u.\n", packet->type );
         return STATUS_INVALID_PARAMETER;
     }
+}
+
+NTSTATUS WINAPI __wine_get_current_process_explicit_app_user_model_id( WCHAR *buffer, INT size )
+{
+    /* CW Hack 22310 */
+    return user_driver->pGetCurrentProcessExplicitAppUserModelID( buffer, size );
+}
+
+NTSTATUS WINAPI __wine_set_current_process_explicit_app_user_model_id( const WCHAR *aumid )
+{
+    /* CW Hack 22310 */
+    return user_driver->pSetCurrentProcessExplicitAppUserModelID( aumid );
 }
 
 /******************************************************************************

@@ -1275,6 +1275,12 @@ static NTSTATUS create_logical_proc_info(void)
     if (sysctlbyname("hw.physicalcpu", &cores_no, &size, NULL, 0))
         cores_no = lcpu_no;
 
+    /* CW HACK 24711: allow restricting the number of processors through an environment variable.
+     * Don't report more packages or physical cores than logical cores.
+     */
+    pkgs_no = MIN(pkgs_no, lcpu_no);
+    cores_no = MIN(cores_no, lcpu_no);
+
     TRACE("%u logical CPUs from %u physical cores across %u packages\n",
             lcpu_no, cores_no, pkgs_no);
 
@@ -1337,6 +1343,14 @@ static NTSTATUS create_logical_proc_info(void)
         cache_sharing[4] = cache_sharing[3];
         cache_sharing[3] = cache_sharing[2];
         cache_sharing[2] = cache_sharing[1];
+
+        /* CW HACK 24711: allow restricting the number of processors through an environment variable
+         * The number of processors (logical cores) needs to be divisible by the number of logical
+         * cores sharing a cache.
+         */
+        if (cache_sharing[4] && (lcpu_no % cache_sharing[4])) cache_sharing[4] = 1;
+        if (cache_sharing[3] && (lcpu_no % cache_sharing[3])) cache_sharing[3] = 1;
+        if (cache_sharing[2] && (lcpu_no % cache_sharing[2])) cache_sharing[2] = 1;
     }
 
     for(p = 0; p < pkgs_no; ++p)
@@ -1613,6 +1627,23 @@ void init_cpu_info(void)
     num = 1;
     FIXME("Detecting the number of processors is not supported.\n");
 #endif
+
+#if defined(__APPLE__)
+    /* CW HACK 24711: allow restricting the number of processors through an environment variable */
+    {
+        const char *ncpu = getenv("WINENCPU");
+        if (ncpu)
+        {
+            long num_override = atoi(ncpu);
+            if (num_override > 0 && num_override < num)
+            {
+                num = num_override;
+                WARN("Restricting number of processors to %ld.\n", num);
+            }
+        }
+    }
+#endif
+
     peb->NumberOfProcessors = num;
     init_cpu_model();
 }
@@ -3183,7 +3214,11 @@ NTSTATUS WINAPI NtQuerySystemInformation( SYSTEM_INFORMATION_CLASS class,
         if (size >= (len = sizeof(SYSTEM_CPU_INFORMATION)))
         {
             SYSTEM_CPU_INFORMATION cpu = get_cpuinfo();
-            memcpy( info, &cpu, len );
+            /* CW HACK 20810: report the emulated processor when in 32-bit-bottle/Wow64 mode */
+            if (wow64_using_32bit_prefix)
+                return NtQuerySystemInformation(SystemEmulationProcessorInformation, info, size, ret_size);
+            else
+                memcpy( info, &cpu, len );
         }
         else ret = STATUS_INFO_LENGTH_MISMATCH;
         break;
@@ -4047,6 +4082,18 @@ NTSTATUS WINAPI NtQuerySystemInformationEx( SYSTEM_INFORMATION_CLASS class,
         }
         memset( machines, 0, len );
 
+        /* CW HACK 20810: report i386-only when in 32-bit-bottle/Wow64 mode */
+        if (wow64_using_32bit_prefix)
+        {
+            machines[0].Machine = IMAGE_FILE_MACHINE_I386;
+            machines[0].UserMode = 1;
+            machines[0].KernelMode = 1;
+            machines[0].Native = 1;
+            machines[0].Process = 1;
+            ret = STATUS_SUCCESS;
+            break;
+        }
+
         /* native machine */
         machines[0].Machine = supported_machines[0];
         machines[0].UserMode = 1;
@@ -4063,6 +4110,7 @@ NTSTATUS WINAPI NtQuerySystemInformationEx( SYSTEM_INFORMATION_CLASS class,
             machines[i].Process = supported_machines[i] == machine;
             machines[i].WoW64Container = 1;
         }
+
         ret = STATUS_SUCCESS;
         break;
     }

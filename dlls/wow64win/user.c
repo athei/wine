@@ -4623,6 +4623,14 @@ NTSTATUS WINAPI wow64_NtUserSetWindowContextHelpId( UINT *args )
     return NtUserSetWindowContextHelpId( hwnd, id );
 }
 
+NTSTATUS WINAPI wow64_NtUserSetWindowFNID( UINT *args )
+{
+    HWND hwnd = get_handle( &args );
+    WORD fnid = get_ulong( &args );
+
+    return NtUserSetWindowFNID( hwnd, fnid );
+}
+
 NTSTATUS WINAPI wow64_NtUserSetWindowLong( UINT *args )
 {
     HWND hwnd = get_handle( &args );
@@ -5170,4 +5178,23 @@ NTSTATUS WINAPI wow64_NtUserDisplayConfigGetDeviceInfo( UINT *args )
     DISPLAYCONFIG_DEVICE_INFO_HEADER *packet = get_ptr( &args );
 
     return NtUserDisplayConfigGetDeviceInfo( packet );
+}
+
+NTSTATUS WINAPI wow64___wine_get_current_process_explicit_app_user_model_id( UINT *args )
+{
+    /* CW Hack 22310 */
+
+    WCHAR *buffer = get_ptr( &args );
+    INT size = get_ulong( &args );
+
+    return __wine_get_current_process_explicit_app_user_model_id( buffer, size );
+}
+
+NTSTATUS WINAPI wow64___wine_set_current_process_explicit_app_user_model_id( UINT *args )
+{
+    /* CW Hack 22310 */
+
+    const WCHAR *aumid = get_ptr( &args );
+
+    return __wine_set_current_process_explicit_app_user_model_id( aumid );
 }

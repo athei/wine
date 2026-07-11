@@ -409,6 +409,30 @@ SIZE_T WINAPI LocalSize( HLOCAL handle )
     return ret;
 }
 
+/* CROSSOVER HACK: bug 17634
+ * This makes the result of GlobalMemoryStatus consistent with
+ * ntdll when the LARGE_ADDRESS_AWARE flag is overridden. */
+#ifndef _WIN64
+static BOOL large_address_enabled(void)
+{
+    static BOOL result = -1;
+
+    if (result == -1)
+    {
+        NTSTATUS status;
+        SYSTEM_BASIC_INFORMATION info;
+
+        status = NtQuerySystemInformation(SystemBasicInformation, &info, sizeof(info), NULL);
+
+        if (status)
+            return 0;
+
+        result = ((ULONG)info.HighestUserAddress >= 0x80000000);
+    }
+
+    return result;
+}
+#endif
 
 /***********************************************************************
  *           GlobalMemoryStatus   (KERNEL32.@)
@@ -463,7 +487,8 @@ VOID WINAPI GlobalMemoryStatus( LPMEMORYSTATUS lpBuffer )
 
     /* values are limited to 2Gb unless the app has the IMAGE_FILE_LARGE_ADDRESS_AWARE flag */
     /* page file sizes are not limited (Adobe Illustrator 8 depends on this) */
-    if (!(nt->FileHeader.Characteristics & IMAGE_FILE_LARGE_ADDRESS_AWARE))
+    if (!(nt->FileHeader.Characteristics & IMAGE_FILE_LARGE_ADDRESS_AWARE) &&
+        !large_address_enabled())
     {
         if (lpBuffer->dwTotalPhys > MAXLONG) lpBuffer->dwTotalPhys = MAXLONG;
         if (lpBuffer->dwAvailPhys > MAXLONG) lpBuffer->dwAvailPhys = MAXLONG;

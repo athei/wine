@@ -800,6 +800,13 @@ static HRESULT ddraw_set_cooperative_level(struct ddraw *ddraw, HWND window,
             restore_mode_on_normal);
     DDRAW_dump_cooperativelevel(cooplevel);
 
+    /* hack for WA/WWP/Diablo, wine bug 2082
+     *
+     * These programs use dialog boxes containing standard controls, which they
+     * draw over using directdraw. If we draw to the given window, the draw will
+     * be clipped by the dialog. Instead, draw to the desktop window. */
+    if (use_desktop_hack) window = GetDesktopWindow();
+
     wined3d_mutex_lock();
 
     if (ddraw->flags & DDRAW_SCL_RECURSIVE)

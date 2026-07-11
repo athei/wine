@@ -1441,7 +1441,7 @@
     SYSCALL_ENTRY( 0x159d, NtUserSetWindowCompositionTransition, 0 ) \
     SYSCALL_ENTRY( 0x159e, NtUserSetWindowContextHelpId, 8 ) \
     SYSCALL_ENTRY( 0x159f, NtUserSetWindowDisplayAffinity, 0 ) \
-    SYSCALL_ENTRY( 0x15a0, NtUserSetWindowFNID, 0 ) \
+    SYSCALL_ENTRY( 0x15a0, NtUserSetWindowFNID, 8 ) \
     SYSCALL_ENTRY( 0x15a1, NtUserSetWindowFeedbackSetting, 0 ) \
     SYSCALL_ENTRY( 0x15a2, NtUserSetWindowGroup, 0 ) \
     SYSCALL_ENTRY( 0x15a3, NtUserSetWindowLong, 16 ) \
@@ -1540,7 +1540,9 @@
     SYSCALL_ENTRY( 0x1600, NtUserYieldTask, 0 ) \
     SYSCALL_ENTRY( 0x1601, NtUserZapActiveAndFocus, 0 ) \
     SYSCALL_ENTRY( 0x1602, NtValidateCompositionSurfaceHandle, 0 ) \
-    SYSCALL_ENTRY( 0x1603, NtVisualCaptureBits, 0 )
+    SYSCALL_ENTRY( 0x1603, NtVisualCaptureBits, 0 ) \
+    SYSCALL_ENTRY( 0x1604, __wine_get_current_process_explicit_app_user_model_id, 8 ) \
+    SYSCALL_ENTRY( 0x1605, __wine_set_current_process_explicit_app_user_model_id, 4 )
 #ifdef _WIN64
 #define ALL_SYSCALLS \
     SYSCALL_ENTRY( 0x1000, NtBindCompositionSurface, 0 ) \
@@ -2983,7 +2985,7 @@
     SYSCALL_ENTRY( 0x159d, NtUserSetWindowCompositionTransition, 0 ) \
     SYSCALL_ENTRY( 0x159e, NtUserSetWindowContextHelpId, 16 ) \
     SYSCALL_ENTRY( 0x159f, NtUserSetWindowDisplayAffinity, 0 ) \
-    SYSCALL_ENTRY( 0x15a0, NtUserSetWindowFNID, 0 ) \
+    SYSCALL_ENTRY( 0x15a0, NtUserSetWindowFNID, 16 ) \
     SYSCALL_ENTRY( 0x15a1, NtUserSetWindowFeedbackSetting, 0 ) \
     SYSCALL_ENTRY( 0x15a2, NtUserSetWindowGroup, 0 ) \
     SYSCALL_ENTRY( 0x15a3, NtUserSetWindowLong, 32 ) \
@@ -3082,7 +3084,9 @@
     SYSCALL_ENTRY( 0x1600, NtUserYieldTask, 0 ) \
     SYSCALL_ENTRY( 0x1601, NtUserZapActiveAndFocus, 0 ) \
     SYSCALL_ENTRY( 0x1602, NtValidateCompositionSurfaceHandle, 0 ) \
-    SYSCALL_ENTRY( 0x1603, NtVisualCaptureBits, 0 )
+    SYSCALL_ENTRY( 0x1603, NtVisualCaptureBits, 0 ) \
+    SYSCALL_ENTRY( 0x1604, __wine_get_current_process_explicit_app_user_model_id, 16 ) \
+    SYSCALL_ENTRY( 0x1605, __wine_set_current_process_explicit_app_user_model_id, 8 )
 #else
 #define ALL_SYSCALLS ALL_SYSCALLS32
 #endif
@@ -4086,7 +4090,6 @@
     SYSCALL_STUB( NtUserSetWindowCompositionAttribute ) \
     SYSCALL_STUB( NtUserSetWindowCompositionTransition ) \
     SYSCALL_STUB( NtUserSetWindowDisplayAffinity ) \
-    SYSCALL_STUB( NtUserSetWindowFNID ) \
     SYSCALL_STUB( NtUserSetWindowFeedbackSetting ) \
     SYSCALL_STUB( NtUserSetWindowGroup ) \
     SYSCALL_STUB( NtUserSetWindowMessageCapability ) \

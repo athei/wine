@@ -970,6 +970,53 @@ static void load_gdi_font_replacements(void)
 
     static const WCHAR replacementsW[] = {'R','e','p','l','a','c','e','m','e','n','t','s'};
 
+/* CROSSOVER HACK - bug 13095 and 13610 */
+    static const WCHAR STSong[] = {'S','T','S','o','n','g',0};
+    static const WCHAR atSTSong[] = {'@','S','T','S','o','n','g',0};
+    static const WCHAR SongTi[] = {0x5b8b,0x4f53,0};
+    static const WCHAR atSongTi[] = {'@',0x5b8b,0x4f53,0};
+    static const WCHAR XinSongTi[] = {0x65B0,0x5b8b,0x4f53,0};
+    static const WCHAR atXinSongTi[] = {'@',0x65B0,0x5b8b,0x4f53,0};
+    static const WCHAR SimSun[] = {'S','i','m','S','u','n',0};
+    static const WCHAR NSimSun[] = {'N','S','i','m','S','u','n',0};
+    static const WCHAR atSimSun[] = {'@','S','i','m','S','u','n',0};
+    static const WCHAR atNSimSun[] = {'@','N','S','i','m','S','u','n',0};
+    static const WCHAR *cn_font_replacement[] = {
+        SimSun,
+        NSimSun,
+        SongTi,
+        XinSongTi,
+        atSimSun,
+        atNSimSun,
+        atSongTi,
+        atXinSongTi
+    };
+    BOOL cn_font_seen[ARRAY_SIZE(cn_font_replacement)] = {FALSE};
+    static const WCHAR new_cn_font[] =
+        {'H','i','r','a','g','i','n','o',' ','S','a','n','s',' ','G','B',' ','W','3','\0',
+        'S','T','S','o','n','g','\0',
+        /* Noto Sans CJK SC Regular - default Simplified Chinese font for Ubuntu 16.04 or later */
+        'N','o','t','o',' ','S','a','n','s',' ','C','J','K',' ','S','C',' ','R','e','g','u','l','a','r','\0',
+        /* Source Han Sans CN - Fedora's default Simplified Chinese font */
+        'S','o','u','r','c','e',' ','H','a','n',' ','S','a','n','s',' ','C','N',' ','R','e','g','u','l','a','r','\0',
+        /* WenQuanYi Micro Hei - popular open source Simplified Chinese font */
+        'W','e','n','Q','u','a','n','Y','i',' ','M','i','c','r','o',' ','H','e','i','\0',
+        /* Droid Sans Fallback - Ubuntu's default Simplified Chinese font */
+        'D','r','o','i','d',' ','S','a','n','s',' ','F','a','l','l','b','a','c','k','\0',0};
+    static const WCHAR vertical_new_cn_font[] =
+        {'@','H','i','r','a','g','i','n','o',' ','S','a','n','s',' ','G','B',' ','W','3','\0',
+        '@','S','T','S','o','n','g','\0',
+        /* Noto Sans CJK SC Regular - default Simplified Chinese font for Ubuntu 16.04 or later */
+        '@','N','o','t','o',' ','S','a','n','s',' ','C','J','K',' ','S','C',' ','R','e','g','u','l','a','r','\0',
+        /* Source Han Sans CN - Fedora's default Simplified Chinese font */
+        '@','S','o','u','r','c','e',' ','H','a','n',' ','S','a','n','s',' ','C','N',' ','R','e','g','u','l','a','r','\0',
+        /* WenQuanYi Micro Hei - popular open source Simplified Chinese font */
+        '@','W','e','n','Q','u','a','n','Y','i',' ','M','i','c','r','o',' ','H','e','i','\0',
+        /* Droid Sans Fallback - Ubuntu's default Simplified Chinese font */
+        '@','D','r','o','i','d',' ','S','a','n','s',' ','F','a','l','l','b','a','c','k','\0',0};
+
+    if (getenv( "CX_TURN_OFF_FONT_REPLACEMENTS" )) return;
+
     /* @@ Wine registry key: HKCU\Software\Wine\Fonts\Replacements */
     if (!(hkey = reg_open_key( wine_fonts_key, replacementsW, sizeof(replacementsW) ))) return;
 
@@ -979,9 +1026,28 @@ static void load_gdi_font_replacements(void)
         /* "NewName"="Oldname" */
         if (!find_family_from_any_name( value ))
         {
+            const WCHAR *replace = data;
+
+            /* CROSSOVER HACK - bug 13095 and 13610 */
+            int j;
+            for (j = 0; j < ARRAY_SIZE(cn_font_replacement); j++)
+            {
+                if (!cn_font_seen[j] && !wcscmp(value, cn_font_replacement[j]))
+                {
+                    BOOL is_vertical = value[0] == '@';
+                    if (info->Type == REG_SZ && !wcscmp(data, is_vertical ? atSTSong : STSong))
+                    {
+                        if (is_vertical) replace = vertical_new_cn_font;
+                        else replace = new_cn_font;
+                        info->Type = REG_MULTI_SZ;
+                    }
+                    cn_font_seen[j] = TRUE;
+                    break;
+                }
+            }
+
             if (info->Type == REG_MULTI_SZ)
             {
-                WCHAR *replace = data;
                 while (*replace)
                 {
                     if (add_family_replacement( value, replace )) break;
@@ -992,6 +1058,26 @@ static void load_gdi_font_replacements(void)
         }
         else TRACE("%s is available. Skip this replacement.\n", debugstr_w(value));
     }
+
+    /* CROSSOVER HACK - bug 13095 and 13610 */
+    for (i = 0; i < ARRAY_SIZE(cn_font_replacement); i++)
+    {
+        if (!cn_font_seen[i] && !find_family_from_any_name(cn_font_replacement[i]))
+        {
+            const WCHAR *replace;
+            if (cn_font_replacement[i][0] == '@')
+                replace = vertical_new_cn_font;
+            else
+                replace = new_cn_font;
+            while (*replace)
+            {
+                if (add_family_replacement(cn_font_replacement[i], replace))
+                    break;
+                replace += lstrlenW(replace) + 1;
+            }
+        }
+    }
+
     NtClose( hkey );
 }
 

@@ -50,7 +50,8 @@ WINE_DEFAULT_DEBUG_CHANNEL(ieframe);
 #define WM_UPDATEADDRBAR    (WM_APP+1)
 
 /* Windows uses "Microsoft Internet Explorer" */
-static const WCHAR wszWineInternetExplorer[] = L"Wine Internet Explorer";
+/* CrossOver: We use "CrossOver Web Browser" */
+static const WCHAR wszWineInternetExplorer[] = L"CrossOver Web Browser";
 
 static LONG obj_cnt;
 static DWORD dde_inst;

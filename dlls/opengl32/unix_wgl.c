@@ -30,6 +30,11 @@
 
 #include <pthread.h>
 
+#ifdef __APPLE__
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
+#endif
+
 #include "ntstatus.h"
 #define WIN32_NO_STATUS
 #include "windef.h"
@@ -159,6 +164,10 @@ struct context
     GLuint draw_fbo;                            /* currently bound draw FBO name */
     GLuint read_fbo;                            /* currently bound read FBO name */
     GLboolean has_viewport;                     /* whether viewport has been initialized */
+
+#ifdef __APPLE__
+    LONG last_error;
+#endif
 };
 
 struct buffer
@@ -2611,6 +2620,40 @@ static void *wow64_map_buffer( TEB *teb, struct buffer *buffer, GLenum target, G
         TRACE( "returning %p\n", buffer->map_ptr );
         return buffer->map_ptr;
     }
+#ifdef __APPLE__
+    else
+    {
+        vm_prot_t cur_protection, max_protection;
+        mach_vm_address_t lowaddr, base;
+        SIZE_T mapping_size;
+        kern_return_t kr;
+
+        /* Get some low memory, then remap it to the host allocation. */
+        base = (vm_map_address_t)ptr & ~PAGE_MASK;
+        mapping_size = (length + ((vm_map_offset_t)ptr - base) + PAGE_MASK) & ~PAGE_MASK;
+        TRACE( "base host address 0x%08llx, aligned size %zu\n", base, mapping_size );
+
+        if (!buffer_vm_alloc( teb, buffer, mapping_size ))
+        {
+            set_gl_error( teb, GL_OUT_OF_MEMORY );
+            goto unmap;
+        }
+
+        lowaddr = (UINT_PTR)buffer->vm_ptr;
+        if ((kr = mach_vm_remap( mach_task_self(), &lowaddr, mapping_size, 0, VM_FLAGS_FIXED|VM_FLAGS_OVERWRITE,
+                                 mach_task_self(), base, FALSE, &cur_protection, &max_protection,
+                                 VM_INHERIT_DEFAULT )) != KERN_SUCCESS)
+        {
+            WARN( "failed to remap memory; Mach error %d\n", kr );
+            set_gl_error( teb, GL_OUT_OF_MEMORY );
+            goto unmap;
+        }
+
+        buffer->map_ptr = (void *)(lowaddr + ((vm_map_offset_t)ptr - base));
+        TRACE( "    remapped pointer %p (aligned size %zu) to address %p\n", ptr, mapping_size, buffer->map_ptr );
+        return buffer->map_ptr;
+    }
+#endif
 
     if (access & GL_MAP_PERSISTENT_BIT)
     {

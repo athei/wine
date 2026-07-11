@@ -85,6 +85,8 @@
 #include "wine/list.h"
 #include "wine/rbtree.h"
 
+#include "cxmenu.h"
+
 WINE_DEFAULT_DEBUG_CHANNEL(menubuilder);
 
 #define in_desktop_dir(csidl) ((csidl)==CSIDL_DESKTOPDIRECTORY || \
@@ -295,7 +297,7 @@ static BOOL create_directories(WCHAR *directory)
     return CreateDirectoryW( directory, NULL ) || GetLastError() == ERROR_ALREADY_EXISTS;
 }
 
-static char* wchars_to_utf8_chars(LPCWSTR string)
+char* wchars_to_utf8_chars(LPCWSTR string)
 {
     char *ret;
     INT size = WideCharToMultiByte(CP_UTF8, 0, string, -1, NULL, 0, NULL, NULL);
@@ -433,7 +435,9 @@ static HRESULT convert_to_native_icon(IStream *icoFile, int *indices, int numInd
             WINE_ERR("error 0x%08lX setting destination bitmap size\n", hr);
             goto endloop;
         }
-        hr = IWICBitmapFrameEncode_SetResolution(dstFrame, 96, 96);
+        /* CROSSOVER HACK bug 4775: Set PNG resolution to 72 DPI so older
+         * CrossOver can correctly convert it to ICNS. */
+        hr = IWICBitmapFrameEncode_SetResolution(dstFrame, 72, 72);
         if (FAILED(hr))
         {
             WINE_ERR("error 0x%08lX setting destination bitmap resolution\n", hr);
@@ -1033,6 +1037,8 @@ static HRESULT open_icon(LPCWSTR filename, int index, BOOL bWait, IStream **ppSt
         if (SUCCEEDED(hr))
             hr = validate_ico(ppStream, ppIconDirEntries, numEntries);
     }
+    if (FAILED(hr) && cx_mode) /* Let cxmenu provide the fallback */
+        return hr;
     if (FAILED(hr) && !bWait)
     {
         hr = open_default_icon(ppStream);
@@ -2301,6 +2307,13 @@ static BOOL InvokeShellLinker( IShellLinkW *sl, LPCWSTR link, BOOL bWait )
         }
     }
 
+    if (cx_mode)
+    {
+        r = cx_process_menu(link, in_desktop_dir(csidl), csidl,
+                            szPath, szArgs, icon_name, szDescription);
+        goto cleanup;
+    }
+
     /* building multiple menus concurrently has race conditions */
     hsem = CreateSemaphoreA( NULL, 1, 1, "winemenubuilder_semaphore");
     if( WAIT_OBJECT_0 != MsgWaitForMultipleObjects( 1, &hsem, FALSE, INFINITE, QS_ALLINPUT ) )
@@ -2418,12 +2431,21 @@ static BOOL InvokeShellLinkerForURL( IUniformResourceLocatorW *url, LPCWSTR link
                  wine_dbgstr_w( pv[0].pwszVal ));
     }
 
+    if (cx_mode)
+    {
+        r = cx_process_menu(link, in_desktop_dir(csidl), csidl,
+                            NULL, NULL, icon_name, NULL);
+        ret = (r != 0);
+        goto cleanup;
+    }
+
     hSem = CreateSemaphoreA( NULL, 1, 1, "winemenubuilder_semaphore");
     if( WAIT_OBJECT_0 != MsgWaitForMultipleObjects( 1, &hSem, FALSE, INFINITE, QS_ALLINPUT ) )
     {
         WINE_ERR("failed wait for semaphore\n");
         goto cleanup;
     }
+
     if (in_desktop_dir(csidl))
         r = !write_desktop_entry(NULL, NULL, link_name, L"start.exe", urlPath, NULL, NULL, icon_name, NULL);
     else
@@ -2487,7 +2509,7 @@ done:
     return ret;
 }
 
-static BOOL Process_Link( LPCWSTR linkname, BOOL bWait )
+BOOL Process_Link( LPCWSTR linkname, BOOL bWait )
 {
     IShellLinkW *sl;
     IPersistFile *pf;
@@ -2548,7 +2570,7 @@ static BOOL Process_Link( LPCWSTR linkname, BOOL bWait )
     return !r;
 }
 
-static BOOL Process_URL( LPCWSTR urlname, BOOL bWait )
+BOOL Process_URL( LPCWSTR urlname, BOOL bWait )
 {
     IUniformResourceLocatorW *url;
     IPersistFile *pf;
@@ -2864,6 +2886,23 @@ static BOOL associations_enabled(void)
     return ret;
 }
 
+static const WCHAR* get_wine_config_dir(void)
+{
+    const WCHAR* nt_path = _wgetenv(L"WINECONFIGDIR");
+
+    if (!nt_path)
+        return NULL;
+
+    if (nt_path[0] == '\\' && nt_path[1] == '?' && nt_path[2] == '?' &&
+        nt_path[3] == '\\' && nt_path[4] && nt_path[5] == ':' && nt_path[6] == '\\')
+    {
+        /* NT path with \??\X:\ prefix */
+        return nt_path + 4;
+    }
+
+    return nt_path;
+}
+
 /***********************************************************************
  *
  *           wWinMain
@@ -2876,6 +2915,9 @@ int PASCAL wWinMain (HINSTANCE hInstance, HINSTANCE prev, LPWSTR cmdline, int sh
     HRESULT hr;
     int ret = 0;
 
+    if (cx_mode)
+        xdg_data_dir = heap_wprintf(L"%s\\windata\\cxmenu", get_wine_config_dir());
+    else
     if (!init_xdg())
         return 1;
 
@@ -2893,12 +2935,13 @@ int PASCAL wWinMain (HINSTANCE hInstance, HINSTANCE prev, LPWSTR cmdline, int sh
 	    break;
         if( !wcscmp( token, L"-a" ) )
         {
-            if (associations_enabled())
+            if (!cx_mode && associations_enabled())
                 RefreshFileTypeAssociations();
             continue;
         }
         if( !wcscmp( token, L"-r" ) )
         {
+            if (!cx_mode)
             cleanup_menus();
             continue;
         }
@@ -2916,6 +2959,16 @@ int PASCAL wWinMain (HINSTANCE hInstance, HINSTANCE prev, LPWSTR cmdline, int sh
                      thumbnail_lnk(lnkFile, outputFile);
             }
         }
+        else if( !lstrcmpW( token, L"--cx-all-menus" ) )
+        {
+            if (!cx_process_all_menus())
+            {
+	        WINE_ERR("failed to build some menu items\n");
+                ret = 1;
+            }
+        }
+        else if( !lstrcmpW( token, L"--cx-dump-menus" ) )
+            cx_dump_menus = 1;
 	else if( token[0] == '-' )
 	{
 	    WINE_ERR( "unknown option %s\n", wine_dbgstr_w(token) );

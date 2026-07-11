@@ -485,6 +485,161 @@ static void kill_all_processes(void);
 
 #define PTID_OFFSET 8  /* offset for first ptid value */
 
+/* crossover usage logging support */
+
+#include <sys/types.h>
+#include <sys/stat.h>
+
+/* get the next char value taking surrogates into account */
+static inline unsigned int get_surrogate_value( const WCHAR *src, unsigned int srclen )
+{
+    if (src[0] >= 0xd800 && src[0] <= 0xdfff)  /* surrogate pair */
+    {
+        if (src[0] > 0xdbff || /* invalid high surrogate */
+            srclen <= 1 ||     /* missing low surrogate */
+            src[1] < 0xdc00 || src[1] > 0xdfff) /* invalid low surrogate */
+            return 0;
+        return 0x10000 + ((src[0] & 0x3ff) << 10) + (src[1] & 0x3ff);
+    }
+    return src[0];
+}
+
+/* query necessary dst length for src string */
+static inline int get_length_utf8( const WCHAR *src, unsigned int srclen )
+{
+    int len;
+    unsigned int val;
+
+    for (len = 0; srclen; srclen--, src++)
+    {
+        if (*src < 0x80)  /* 0x00-0x7f: 1 byte */
+        {
+            len++;
+            continue;
+        }
+        if (*src < 0x800)  /* 0x80-0x7ff: 2 bytes */
+        {
+            len += 2;
+            continue;
+        }
+        if (!(val = get_surrogate_value( src, srclen ))) continue;
+        if (val < 0x10000)  /* 0x800-0xffff: 3 bytes */
+            len += 3;
+        else   /* 0x10000-0x10ffff: 4 bytes */
+        {
+            len += 4;
+            src++;
+            srclen--;
+        }
+    }
+    return len;
+}
+
+/* wide char to UTF-8 string conversion */
+/* return -1 on dst buffer overflow, -2 on invalid input char */
+static int utf8_wcstombs( const WCHAR *src, int srclen, char *dst, int dstlen )
+{
+    int len;
+
+    for (len = dstlen; srclen; srclen--, src++)
+    {
+        WCHAR ch = *src;
+        unsigned int val;
+
+        if (ch < 0x80)  /* 0x00-0x7f: 1 byte */
+        {
+            *dst++ = ch;
+            continue;
+        }
+        if (ch < 0x800)  /* 0x80-0x7ff: 2 bytes */
+        {
+            dst[1] = 0x80 | (ch & 0x3f);
+            ch >>= 6;
+            dst[0] = 0xc0 | ch;
+            dst += 2;
+            continue;
+        }
+        if (!(val = get_surrogate_value( src, srclen ))) continue;
+        if (val < 0x10000)  /* 0x800-0xffff: 3 bytes */
+        {
+            dst[2] = 0x80 | (val & 0x3f);
+            val >>= 6;
+            dst[1] = 0x80 | (val & 0x3f);
+            val >>= 6;
+            dst[0] = 0xe0 | val;
+            dst += 3;
+        }
+        else   /* 0x10000-0x10ffff: 4 bytes */
+        {
+            dst[3] = 0x80 | (val & 0x3f);
+            val >>= 6;
+            dst[2] = 0x80 | (val & 0x3f);
+            val >>= 6;
+            dst[1] = 0x80 | (val & 0x3f);
+            val >>= 6;
+            dst[0] = 0xf0 | val;
+            dst += 4;
+            src++;
+            srclen--;
+        }
+    }
+    return dstlen - len;
+}
+
+static void log_process_event( struct process *process, const char *fmt, ... )
+{
+    static unsigned int bottle_inode = 0;
+    const char *name = getenv( "CX_WINE_USAGE_LOGFILE" );
+    const char *appid = getenv( "CX_BOTTLE_CREATOR_APPID" );
+    struct memory_view *exe;
+    struct unicode_str nt_name;
+    char *ptr, *buffer, prefix[128], bottleid[12];
+    int fd, len1, len2, len3, len4;
+    va_list args;
+
+    appid = appid ? appid : "--unknown--";
+
+    if (!name || name[0] != '/') return;  /* needs to be an absolute path */
+
+    if ((fd = open( name, O_WRONLY | O_APPEND | O_CREAT, 0600 )) == -1) return;
+
+    if (!(exe = get_exe_view( process )) || !get_view_nt_name( exe, &nt_name ))
+        goto done;
+
+    if (!bottle_inode)
+    {
+        struct stat st;
+        if (!fstat( config_dir_fd, &st ))
+            bottle_inode = st.st_ino;
+    }
+
+    va_start( args, fmt );
+    len1 = vsnprintf( prefix, sizeof(prefix), fmt, args );
+    va_end( args );
+    len2 = snprintf( bottleid, sizeof(bottleid), "%u ", bottle_inode );
+    len3 = get_length_utf8( nt_name.str, nt_name.len/sizeof(WCHAR) );
+    len4 = strlen( appid );
+
+    if (len1 < 0 || len1 >= sizeof(prefix) ||
+        len2 < 0 || len2 >= sizeof(bottleid) ||
+        len3 < 0)
+        goto done;
+    if (!(buffer = ptr = malloc( len1 + len2 + len3 + len4 + 3 ))) goto done;
+    memcpy( ptr, prefix, len1 );
+    ptr += len1;
+    memcpy( ptr, bottleid, len2 );
+    ptr += len2;
+    ptr += utf8_wcstombs( nt_name.str, nt_name.len/sizeof(WCHAR), ptr, len3 );
+    *ptr++ = ' ';
+    memcpy( ptr, appid, len4 );
+    ptr += len4;
+    *ptr++ = '\n';
+    write( fd, buffer, ptr - buffer );
+    free( buffer );
+done:
+    close( fd );
+}
+
 static unsigned int index_from_ptid(unsigned int id) { return id / 4; }
 static unsigned int ptid_from_index(unsigned int index) { return index * 4; }
 
@@ -992,6 +1147,9 @@ static void process_killed( struct process *process )
     if (process->idle_event) release_object( process->idle_event );
     process->idle_event = NULL;
     assert( !process->console );
+
+    if (!process->is_system)
+        log_process_event( process, "exit %x %u ", process->exit_code, (unsigned)((process->end_time-process->start_time)/TICKS_PER_SEC) );
 
     destroy_process_classes( process );
     free_mapped_views( process );

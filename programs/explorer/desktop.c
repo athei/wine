@@ -1185,7 +1185,8 @@ static void set_shell_window( HWND hwnd )
 
     if (!(desk = GetThreadDesktop( GetCurrentThreadId() )) ||
         !GetUserObjectInformationW( desk, UOI_NAME, desk_name, ARRAY_SIZE( desk_name ), NULL ) ||
-        wcscmp( desk_name, L"Default" ))
+        (wcscmp( desk_name, L"Default" ) &&
+         wcscmp( desk_name, L"root" ) /* CW Hack 24270 */))
     {
         return;
     }

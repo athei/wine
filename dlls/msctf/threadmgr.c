@@ -35,7 +35,21 @@
 #include "msctf.h"
 #include "msctf_internal.h"
 
+#include "initguid.h"
+#include "ctffunc.h"
+
 WINE_DEFAULT_DEBUG_CHANNEL(msctf);
+
+static CRITICAL_SECTION ThreadMgrCs;
+static CRITICAL_SECTION_DEBUG ThreadMgrCsDebug =
+{
+    0, 0, &ThreadMgrCs,
+    {&ThreadMgrCsDebug.ProcessLocksList,
+     &ThreadMgrCsDebug.ProcessLocksList },
+     0, 0, {(DWORD_PTR)(__FILE__ ": ThreadMgrCs")}
+};
+static CRITICAL_SECTION ThreadMgrCs = {&ThreadMgrCsDebug, -1, 0, 0, 0, 0};
+struct list ThreadMgrList = LIST_INIT(ThreadMgrList);
 
 typedef struct tagPreservedKey
 {
@@ -70,6 +84,7 @@ typedef struct tagACLMulti {
     /* const ITfLangBarItemMgrVtbl *LangBarItemMgrVtbl; */
     ITfUIElementMgr ITfUIElementMgr_iface;
     ITfSourceSingle ITfSourceSingle_iface;
+    ITfFunctionProvider ITfFunctionProvider_iface;
     LONG refCount;
 
     /* Aggregation */
@@ -98,6 +113,9 @@ typedef struct tagACLMulti {
     struct list     ThreadMgrEventSink;
     struct list     UIElementSink;
     struct list     InputProcessorProfileActivationSink;
+
+    DWORD threadId;
+    struct list entry;
 } ThreadMgr;
 
 typedef struct tagEnumTfDocumentMgr {
@@ -109,6 +127,11 @@ typedef struct tagEnumTfDocumentMgr {
 } EnumTfDocumentMgr;
 
 static HRESULT EnumTfDocumentMgr_Constructor(struct list* head, IEnumTfDocumentMgrs **ppOut);
+
+static inline ThreadMgr *impl_from_ITfThreadMgr(ITfThreadMgr *iface)
+{
+    return CONTAINING_RECORD(iface, ThreadMgr, ITfThreadMgrEx_iface);
+}
 
 static inline ThreadMgr *impl_from_ITfThreadMgrEx(ITfThreadMgrEx *iface)
 {
@@ -150,9 +173,169 @@ static inline ThreadMgr *impl_from_ITfSourceSingle(ITfSourceSingle *iface)
     return CONTAINING_RECORD(iface, ThreadMgr, ITfSourceSingle_iface);
 }
 
+static ThreadMgr *impl_from_ITfFunctionProvider(ITfFunctionProvider *iface)
+{
+    return CONTAINING_RECORD(iface, ThreadMgr, ITfFunctionProvider_iface);
+}
+
 static inline EnumTfDocumentMgr *impl_from_IEnumTfDocumentMgrs(IEnumTfDocumentMgrs *iface)
 {
     return CONTAINING_RECORD(iface, EnumTfDocumentMgr, IEnumTfDocumentMgrs_iface);
+}
+
+static HRESULT WINAPI reconversion_QueryInterface(ITfFnReconversion *iface, REFIID iid, LPVOID *ppvOut)
+{
+    TRACE("(%p) %s, %p.\n", iface, debugstr_guid(iid), ppvOut);
+
+    *ppvOut = NULL;
+    if (IsEqualIID(iid, &IID_IUnknown) || IsEqualIID(iid, &IID_ITfFnReconversion)
+            || IsEqualIID(iid, &IID_ITfFunction))
+    {
+        *ppvOut = iface;
+        return S_OK;
+    }
+
+    WARN("unsupported interface: %s\n", debugstr_guid(iid));
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI reconversion_AddRef(ITfFnReconversion *iface)
+{
+    TRACE("(%p).\n", iface);
+    return 2;
+}
+
+static ULONG WINAPI reconversion_Release(ITfFnReconversion *iface)
+{
+    TRACE("(%p).\n", iface);
+    return 1;
+}
+
+static HRESULT WINAPI reconversion_GetDisplayName(ITfFnReconversion *iface, BSTR *name)
+{
+    FIXME("(%p) %p stub.\n", iface, name);
+
+    *name = SysAllocString(L"Stub");
+    return S_OK;
+}
+
+static HRESULT WINAPI reconversion_QueryRange(ITfFnReconversion *iface, ITfRange *range, ITfRange **new_range, BOOL *convertable)
+{
+    FIXME("(%p) %p %p %p stub.\n", iface, range, new_range, convertable);
+
+    *convertable = FALSE;
+    *new_range = NULL;
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI reconversion_GetReconversion(ITfFnReconversion *iface, ITfRange *range, ITfCandidateList **cand_list)
+{
+    FIXME("(%p) %p %p stub.\n", iface, range, cand_list);
+
+    *cand_list = NULL;
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI reconversion_Reconvert(ITfFnReconversion *iface, ITfRange *range)
+{
+    FIXME("(%p) %p stub.\n", iface, range);
+    return E_NOTIMPL;
+}
+
+static ITfFnReconversionVtbl reconversion_vtbl =
+{
+    reconversion_QueryInterface,
+    reconversion_AddRef,
+    reconversion_Release,
+    reconversion_GetDisplayName,
+    reconversion_QueryRange,
+    reconversion_GetReconversion,
+    reconversion_Reconvert,
+};
+
+static ITfFnReconversion reconversion_stub = { &reconversion_vtbl };
+
+static HRESULT WINAPI func_provider_QueryInterface(ITfFunctionProvider *iface, REFIID iid, LPVOID *ppvOut)
+{
+    ThreadMgr *This = impl_from_ITfFunctionProvider(iface);
+    return ITfThreadMgrEx_QueryInterface(&This->ITfThreadMgrEx_iface, iid, ppvOut);
+}
+
+static ULONG WINAPI func_provider_AddRef(ITfFunctionProvider *iface)
+{
+    ThreadMgr *This = impl_from_ITfFunctionProvider(iface);
+    return ITfThreadMgrEx_AddRef(&This->ITfThreadMgrEx_iface);
+}
+
+static ULONG WINAPI func_provider_Release(ITfFunctionProvider *iface)
+{
+    ThreadMgr *This = impl_from_ITfFunctionProvider(iface);
+    return ITfThreadMgrEx_Release(&This->ITfThreadMgrEx_iface);
+}
+
+static HRESULT WINAPI func_provider_GetType(ITfFunctionProvider *iface, GUID *guid)
+{
+    FIXME("(%p) %p stub.\n", iface, guid);
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI func_provider_GetDescription(ITfFunctionProvider *iface, BSTR *desc)
+{
+    FIXME("(%p) %p stub.\n", iface, desc);
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI func_provider_GetFunction(ITfFunctionProvider *iface, REFGUID guid, REFIID riid, IUnknown **func)
+{
+    FIXME("(%p) %s %s %p stub.\n", iface, debugstr_guid(guid), debugstr_guid(riid), func);
+
+    if (IsEqualIID(riid, &IID_ITfFnReconversion))
+    {
+        TRACE("returning ITfFnReconversio stub.\n");
+        *func = (IUnknown *)&reconversion_stub;
+        return S_OK;
+    }
+    return E_NOTIMPL;
+}
+
+static const ITfFunctionProviderVtbl TfFunctionProviderVtbl =
+{
+    func_provider_QueryInterface,
+    func_provider_AddRef,
+    func_provider_Release,
+    func_provider_GetType,
+    func_provider_GetDescription,
+    func_provider_GetFunction,
+};
+
+
+/***********************************************************************
+ *              TF_GetThreadMgr (MSCTF.@)
+ */
+HRESULT WINAPI TF_GetThreadMgr(ITfThreadMgr **pptim)
+{
+    DWORD id = GetCurrentThreadId();
+    ThreadMgr *cursor;
+
+    TRACE("%p\n", pptim);
+
+    if (!pptim)
+        return E_INVALIDARG;
+
+    EnterCriticalSection(&ThreadMgrCs);
+    LIST_FOR_EACH_ENTRY(cursor, &ThreadMgrList, ThreadMgr, entry)
+    {
+        if (cursor->threadId == id)
+        {
+            ITfThreadMgrEx_AddRef(&cursor->ITfThreadMgrEx_iface);
+            *pptim = (ITfThreadMgr *)&cursor->ITfThreadMgrEx_iface;
+            LeaveCriticalSection(&ThreadMgrCs);
+            return S_OK;
+        }
+    }
+    LeaveCriticalSection(&ThreadMgrCs);
+    *pptim = NULL;
+    return E_FAIL;
 }
 
 static void ThreadMgr_Destructor(ThreadMgr *This)
@@ -163,7 +346,9 @@ static void ThreadMgr_Destructor(ThreadMgr *This)
     if (This->focusHook)
         UnhookWindowsHookEx(This->focusHook);
 
-    TlsSetValue(tlsIndex,NULL);
+    EnterCriticalSection(&ThreadMgrCs);
+    list_remove(&This->entry);
+    LeaveCriticalSection(&ThreadMgrCs);
     TRACE("destroying %p\n", This);
     if (This->focus)
         ITfDocumentMgr_Release(This->focus);
@@ -386,17 +571,20 @@ static HRESULT WINAPI ThreadMgr_SetFocus(ITfThreadMgrEx *iface, ITfDocumentMgr *
 
 static LRESULT CALLBACK ThreadFocusHookProc(int nCode, WPARAM wParam, LPARAM lParam)
 {
+    ITfThreadMgr *ThreadMgr_iface;
     ThreadMgr *This;
 
-    This = TlsGetValue(tlsIndex);
-    if (!This)
+    if (FAILED(TF_GetThreadMgr(&ThreadMgr_iface)))
     {
         ERR("Hook proc but no ThreadMgr for this thread. Serious Error\n");
         return 0;
     }
+
+    This = impl_from_ITfThreadMgr(ThreadMgr_iface);
     if (!This->focusHook)
     {
         ERR("Hook proc but no ThreadMgr focus Hook. Serious Error\n");
+        ITfThreadMgr_Release(ThreadMgr_iface);
         return 0;
     }
 
@@ -417,6 +605,7 @@ static LRESULT CALLBACK ThreadFocusHookProc(int nCode, WPARAM wParam, LPARAM lPa
         }
     }
 
+    ITfThreadMgr_Release(ThreadMgr_iface);
     return CallNextHookEx(This->focusHook, nCode, wParam, lParam);
 }
 
@@ -493,8 +682,11 @@ static HRESULT WINAPI ThreadMgr_GetFunctionProvider(ITfThreadMgrEx *iface, REFCL
 ITfFunctionProvider **ppFuncProv)
 {
     ThreadMgr *This = impl_from_ITfThreadMgrEx(iface);
-    FIXME("STUB:(%p)\n",This);
-    return E_NOTIMPL;
+
+    TRACE("(%p)\n",This);
+    *ppFuncProv = &This->ITfFunctionProvider_iface;
+    ITfFunctionProvider_AddRef(*ppFuncProv);
+    return S_OK;
 }
 
 static HRESULT WINAPI ThreadMgr_EnumFunctionProviders(ITfThreadMgrEx *iface,
@@ -1346,13 +1538,8 @@ HRESULT ThreadMgr_Constructor(IUnknown *pUnkOuter, IUnknown **ppOut)
         return CLASS_E_NOAGGREGATION;
 
     /* Only 1 ThreadMgr is created per thread */
-    This = TlsGetValue(tlsIndex);
-    if (This)
-    {
-        ThreadMgr_AddRef(&This->ITfThreadMgrEx_iface);
-        *ppOut = (IUnknown*)&This->ITfThreadMgrEx_iface;
+    if (SUCCEEDED(TF_GetThreadMgr((ITfThreadMgr **)ppOut)))
         return S_OK;
-    }
 
     This = calloc(1, sizeof(ThreadMgr));
     if (This == NULL)
@@ -1366,8 +1553,8 @@ HRESULT ThreadMgr_Constructor(IUnknown *pUnkOuter, IUnknown **ppOut)
     This->ITfThreadMgrEventSink_iface.lpVtbl = &ThreadMgrEventSinkVtbl;
     This->ITfUIElementMgr_iface.lpVtbl = &ThreadMgrUIElementMgrVtbl;
     This->ITfSourceSingle_iface.lpVtbl = &SourceSingleVtbl;
+    This->ITfFunctionProvider_iface.lpVtbl = &TfFunctionProviderVtbl;
     This->refCount = 1;
-    TlsSetValue(tlsIndex,This);
 
     CompartmentMgr_Constructor((IUnknown*)&This->ITfThreadMgrEx_iface, &IID_IUnknown, (IUnknown**)&This->CompartmentMgr);
 
@@ -1383,6 +1570,11 @@ HRESULT ThreadMgr_Constructor(IUnknown *pUnkOuter, IUnknown **ppOut)
     list_init(&This->ThreadMgrEventSink);
     list_init(&This->UIElementSink);
     list_init(&This->InputProcessorProfileActivationSink);
+
+    This->threadId = GetCurrentThreadId();
+    EnterCriticalSection(&ThreadMgrCs);
+    list_add_tail(&ThreadMgrList, &This->entry);
+    LeaveCriticalSection(&ThreadMgrCs);
 
     TRACE("returning %p\n", This);
     *ppOut = (IUnknown *)&This->ITfThreadMgrEx_iface;

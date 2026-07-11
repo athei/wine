@@ -926,6 +926,11 @@ static void sys_command_size_move( HWND hwnd, WPARAM wparam )
                                     orig_rect.bottom - orig_rect.top,
                                     hittest == HTCAPTION ? SWP_NOSIZE : 0 );
         }
+
+        /* CrossOver Hack 10879 */
+        if (hittest != HTCAPTION)
+            NtUserRedrawWindow( hwnd, NULL, NULL,
+                                RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN );
     }
 
     if (is_iconic(hwnd) && !moved && (style & WS_SYSMENU))

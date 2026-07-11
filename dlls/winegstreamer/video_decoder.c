@@ -581,6 +581,17 @@ static HRESULT WINAPI transform_GetInputAvailableType(IMFTransform *iface, DWORD
     return MFCreateVideoMediaTypeFromSubtype(decoder->input_types[index], (IMFVideoMediaType **)type);
 }
 
+/* CW HACK 26265 */
+extern void CDECL wine_get_host_version( const char **sysname, const char **release );
+
+static BOOL is_macos(void)
+{
+    const char *sysname;
+
+    wine_get_host_version( &sysname, NULL );
+    return !strcmp( sysname, "Darwin" );
+}
+
 static HRESULT WINAPI transform_GetOutputAvailableType(IMFTransform *iface, DWORD id,
         DWORD index, IMFMediaType **type)
 {
@@ -593,6 +604,17 @@ static HRESULT WINAPI transform_GetOutputAvailableType(IMFTransform *iface, DWOR
         return MF_E_TRANSFORM_TYPE_NOT_SET;
     if (index >= decoder->output_type_count)
         return MF_E_NO_MORE_TYPES;
+
+    /* CW HACK 26265 */
+    if (is_macos() && IsEqualGUID(decoder->output_types[index], &MFVideoFormat_NV12))
+    {
+        WARN("Skipping NV12 output format\n");
+        index++;
+
+        if (index >= decoder->output_type_count)
+            return MF_E_NO_MORE_TYPES;
+    }
+
     return create_output_media_type(decoder, decoder->output_types[index], NULL, type);
 }
 

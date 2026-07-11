@@ -38,6 +38,15 @@
 # include <mach-o/dyld.h>
 #endif
 
+#ifdef __APPLE__ /* CrossOver Hack 13438 */
+#include <crt_externs.h>
+#include <mach/mach.h>
+#include <mach/vm_map.h>
+#include <mach-o/dyld.h>
+#include <mach-o/getsect.h>
+#include <mach-o/ldsyms.h>
+#endif
+
 #include "main.h"
 
 #if defined(__APPLE__) && defined(__x86_64__) && !defined(HAVE_WINE_PRELOADER)
@@ -167,6 +176,97 @@ static void *try_dlopen( const char *argv0 )
     return handle;
 }
 
+#ifdef __APPLE__
+#define min(a,b)   (((a) < (b)) ? (a) : (b))
+/***********************************************************************
+ *           apple_override_bundle_name
+ *
+ * Rewrite the bundle name in the Info.plist embedded in the loader.
+ * This is the only way to control the title of the application menu
+ * when using the Mac driver.  The GUI frameworks call down into Core
+ * Foundation to get the bundle name for that.
+ *
+ * CrossOver Hack 13438
+ */
+static void apple_override_bundle_name( int argc, char *argv[] )
+{
+    char* info_plist;
+    unsigned long remaining;
+    static const char prefix[] = "<key>CFBundleName</key>\n    <string>";
+    const size_t prefix_len = strlen(prefix);
+    static const char suffix[] = "</string>";
+    const size_t suffix_len = strlen(suffix);
+    static const char padding[] = "<!-- bundle name padding -->";
+    const size_t padding_len = strlen(padding);
+    char* bundle_name;
+    const char* p;
+    size_t bundle_name_len, max_bundle_name_len;
+    vm_address_t start, end;
+    const char* new_bundle_name = getenv("WINEPRELOADERAPPNAME");
+    size_t new_bundle_name_len;
+
+    unsetenv("WINEPRELOADERAPPNAME");
+
+    if (!new_bundle_name && argc < 2)
+        return;
+
+    info_plist = (char *)getsectiondata(_NSGetMachExecuteHeader(), "__TEXT", "__info_plist", &remaining);
+    if (!info_plist || !remaining)
+        return;
+
+    bundle_name = strnstr(info_plist, prefix, remaining);
+    if (!bundle_name)
+        return;
+
+    bundle_name += prefix_len;
+    remaining -= bundle_name - info_plist;
+    p = strnstr(bundle_name, suffix, remaining);
+    if (!p)
+        return;
+
+    bundle_name_len = p - bundle_name;
+    remaining -= bundle_name_len + suffix_len;
+
+    max_bundle_name_len = bundle_name_len;
+    if (padding_len <= remaining &&
+        !memcmp(bundle_name + bundle_name_len + suffix_len, padding, padding_len))
+        max_bundle_name_len += padding_len;
+
+    if (!new_bundle_name)
+    {
+        new_bundle_name = argv[1];
+        if ((p = strrchr(new_bundle_name, '\\'))) new_bundle_name = p + 1;
+        if ((p = strrchr(new_bundle_name, '/'))) new_bundle_name = p + 1;
+        if (strspn(new_bundle_name, "0123456789abcdefABCDEF") == 32 &&
+            new_bundle_name[32] == '.')
+            new_bundle_name += 33;
+        if ((p = strrchr(new_bundle_name, '.')) && p != new_bundle_name)
+            new_bundle_name_len = p - new_bundle_name;
+        else
+            new_bundle_name_len = strlen(new_bundle_name);
+    }
+    else
+        new_bundle_name_len = strlen(new_bundle_name);
+
+    if (!new_bundle_name_len)
+        return;
+
+    start = (vm_address_t)bundle_name;
+    end = (vm_address_t)(bundle_name + max_bundle_name_len + suffix_len);
+    start &= ~(getpagesize() - 1);
+    end = (end + getpagesize() - 1) & ~(getpagesize() - 1);
+    if (vm_protect(mach_task_self(), start, end - start, 0,
+                   VM_PROT_READ|VM_PROT_WRITE|VM_PROT_EXECUTE|VM_PROT_COPY) == KERN_SUCCESS)
+    {
+        size_t copy_len = min(new_bundle_name_len, max_bundle_name_len);
+        memcpy(bundle_name, new_bundle_name, copy_len);
+        memcpy(bundle_name + copy_len, suffix, suffix_len);
+        if (copy_len < max_bundle_name_len)
+            memset(bundle_name + copy_len + suffix_len, ' ', max_bundle_name_len - copy_len);
+        vm_protect(mach_task_self(), start, end - start, 0, VM_PROT_READ|VM_PROT_EXECUTE);
+    }
+}
+#endif
 
 /**********************************************************************
  *           main
@@ -176,6 +276,10 @@ int main( int argc, char *argv[] )
     void *handle;
 
     init_reserved_areas();
+
+#ifdef __APPLE__ /* CrossOver Hack 13438 */
+    apple_override_bundle_name(argc, argv);
+#endif
 
     if ((handle = try_dlopen( get_self_exe() )) ||
         (handle = try_dlopen( argv[0] )))

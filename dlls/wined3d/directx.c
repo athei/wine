@@ -1811,6 +1811,42 @@ HRESULT CDECL wined3d_adapter_get_identifier(const struct wined3d_adapter *adapt
 
     wined3d_mutex_unlock();
 
+    {
+        WCHAR name[MAX_PATH], *module_exe;
+        if (GetModuleFileNameW(NULL, name, sizeof(name)))
+        {
+            module_exe = wcsrchr(name, '\\');
+            module_exe = module_exe ? module_exe + 1 : name;
+
+            /* CW HACK 19356 */
+            if (!lstrcmpW(module_exe, L"GTAIV.exe"))
+            {
+                /* GTA IV hangs on launch trying to init nvapi if it sees an NVIDIA GPU */
+                if (identifier->vendor_id == HW_VENDOR_NVIDIA)
+                {
+                    identifier->vendor_id = HW_VENDOR_AMD;
+                    identifier->device_id = CARD_AMD_RADEON_RX_480;
+                }
+
+                /* GTA IV ends up using its "Intel integrated" codepath for determining
+                 * VRAM size (since nvapi/atiadlxx fail), but this requires that
+                 * DedicatedVideoMemory is a very small dummy value, and SharedSystemMemory
+                 * is the actual VRAM size.
+                 * Swap the memory values around so this works.
+                 */
+                identifier->shared_system_memory = identifier->video_memory;
+                identifier->video_memory = 32 * 1024 * 1024;
+            }
+
+            /* CW HACK 19355: GTA 5 crashes on launch trying to init nvapi if it sees an NVIDIA GPU */
+            if (!lstrcmpW(module_exe, L"GTA5.exe") && (identifier->vendor_id == HW_VENDOR_NVIDIA))
+            {
+                    identifier->vendor_id = HW_VENDOR_AMD;
+                    identifier->device_id = CARD_AMD_RADEON_RX_480;
+            }
+        }
+    }
+
     return WINED3D_OK;
 }
 
@@ -3481,13 +3517,25 @@ done:
 
 static struct wined3d_adapter *wined3d_adapter_create(unsigned int ordinal, DWORD wined3d_creation_flags)
 {
+    struct wined3d_adapter *adapter = NULL;
+
     if (wined3d_creation_flags & WINED3D_NO3D)
         return wined3d_adapter_no3d_create(ordinal, wined3d_creation_flags);
 
     if (wined3d_settings.renderer == WINED3D_RENDERER_VULKAN)
         return wined3d_adapter_vk_create(ordinal, wined3d_creation_flags);
 
-    return wined3d_adapter_gl_create(ordinal, wined3d_creation_flags);
+    if (wined3d_settings.renderer == WINED3D_RENDERER_OPENGL)
+        return wined3d_adapter_gl_create(ordinal, wined3d_creation_flags);
+
+    /* CW HACK 18311: Use the Vulkan renderer on macOS. */
+    if ((adapter = wined3d_adapter_vk_create(ordinal, wined3d_creation_flags)))
+        ERR_(winediag)("Using the Vulkan renderer for d3d10/11 applications.\n");
+
+    if (!adapter)
+        adapter = wined3d_adapter_gl_create(ordinal, wined3d_creation_flags);
+
+    return adapter;
 }
 
 static void STDMETHODCALLTYPE wined3d_null_wined3d_object_destroyed(void *parent) {}

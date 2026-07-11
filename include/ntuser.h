@@ -633,6 +633,15 @@ enum associate_input_context_result
     AICR_FAILED,
 };
 
+/* CX HACK 23950 */
+struct flush_shm_surface_params
+{
+    BITMAPINFO info;
+    RECT bounds;
+    ULONG section;
+    ULONG hwnd;
+};
+
 /* internal messages codes */
 enum wine_internal_message
 {
@@ -650,6 +659,7 @@ enum wine_internal_message
     WM_WINE_UPDATEWINDOWSTATE,
     WM_WINE_TRACKMOUSEEVENT,
     WM_WINE_SETPIXELFORMAT,
+    WM_WINE_FLUSHSHMSURFACE, /* CX HACK 23950 */
     WM_WINE_FIRST_DRIVER_MSG = 0x80001000,  /* range of messages reserved for the USER driver */
     WM_WINE_CLIPCURSOR = 0x80001ff0, /* internal driver notification messages */
     WM_WINE_SETCURSOR,
@@ -666,6 +676,12 @@ enum wine_internal_message
 /* internal WM_IME_NOTIFY wparams, not compatible with Windows */
 #define IMN_WINE_SET_OPEN_STATUS  0x000f
 #define IMN_WINE_SET_COMP_STRING  0x0010
+
+/* not compatible with Windows */
+#define GWLP_FNID_INTERNAL (-1000)
+#define MAKE_FNID(off, len) (((off) << 8) + len)
+#define FNID_OFF(fnid) ((fnid) >> 8)
+#define FNID_LEN(fnid) ((fnid) & 0xff)
 
 /* builtin IME driver calls */
 enum wine_ime_call
@@ -1017,6 +1033,7 @@ W32KAPI HWND    WINAPI NtUserSetTaskmanWindow( HWND hwnd );
 W32KAPI BOOL    WINAPI NtUserSetThreadDesktop( HDESK handle );
 W32KAPI UINT_PTR WINAPI NtUserSetTimer( HWND hwnd, UINT_PTR id, UINT timeout, TIMERPROC proc, ULONG tolerance );
 W32KAPI BOOL    WINAPI NtUserSetWindowContextHelpId( HWND hwnd, DWORD id );
+W32KAPI BOOL    WINAPI NtUserSetWindowFNID( HWND hwnd, WORD fnid );
 W32KAPI LONG    WINAPI NtUserSetWindowLong( HWND hwnd, INT offset, LONG newval, BOOL ansi );
 W32KAPI LONG_PTR WINAPI NtUserSetWindowLongPtr( HWND hwnd, INT offset, LONG_PTR newval, BOOL ansi );
 W32KAPI BOOL    WINAPI NtUserSetWindowPlacement( HWND hwnd, const WINDOWPLACEMENT *wpl );
@@ -1422,6 +1439,8 @@ enum
     NtUserCallHwndParam_ExposeWindowSurface,
     NtUserCallHwndParam_GetWinMonitorDpi,
     NtUserCallHwndParam_SetRawWindowPos,
+    NtUserCallHwndParam_GetPrivateData,
+    NtUserCallHwndParam_SetPrivateData,
 };
 
 struct get_window_rects_params
@@ -1647,5 +1666,34 @@ static inline BOOL NtUserSetRawWindowPos( HWND hwnd, RECT rect, UINT flags, BOOL
     struct set_raw_window_pos_params params = {.rect = rect, .flags = flags, .internal = internal};
     return NtUserCallHwndParam( hwnd, (UINT_PTR)&params, NtUserCallHwndParam_SetRawWindowPos );
 }
+
+struct get_private_data_params
+{
+    UINT offset;
+    UINT size;
+};
+
+static inline LONG_PTR NtUserGetPrivateData( HWND hwnd, UINT offset, UINT size )
+{
+    struct get_private_data_params params = { .offset = offset, .size = size };
+    return NtUserCallHwndParam( hwnd, (UINT_PTR)&params, NtUserCallHwndParam_GetPrivateData );
+}
+
+struct set_private_data_params
+{
+    UINT offset;
+    UINT size;
+    LONG64 value;
+};
+
+static inline LONG_PTR NtUserSetPrivateData( HWND hwnd, UINT offset, UINT size, LONG_PTR value )
+{
+    struct set_private_data_params params = { .offset = offset, .size = size, .value = value };
+    return NtUserCallHwndParam( hwnd, (UINT_PTR)&params, NtUserCallHwndParam_SetPrivateData );
+}
+
+/* CW Hack 22310 */
+extern NTSTATUS WINAPI __wine_get_current_process_explicit_app_user_model_id( WCHAR *buffer, INT size );
+extern NTSTATUS WINAPI __wine_set_current_process_explicit_app_user_model_id( const WCHAR *aumid );
 
 #endif /* _NTUSER_ */

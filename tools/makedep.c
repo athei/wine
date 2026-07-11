@@ -141,6 +141,7 @@ static struct strarray subdirs;
 static struct strarray delay_import_libs;
 static struct strarray top_install[NB_INSTALL_RULES];
 static const char *root_src_dir;
+static const char *po_src_dir;
 static const char *tools_dir;
 static const char *tools_ext;
 static const char *wine64_dir;
@@ -3175,8 +3176,11 @@ static void output_source_desktop( struct makefile *make, struct incl_file *sour
  */
 static void output_source_po( struct makefile *make, struct incl_file *source, const char *obj )
 {
-    output( "%s.mo: %s\n", obj_dir_path( make, obj ), source->filename );
-    output( "\t%s%s -o $@ %s\n", cmd_prefix( "MSG" ), msgfmt, source->filename );
+    char *source_file = source->filename;
+
+    if (po_src_dir) source_file = concat_paths( po_src_dir, get_basename( source->filename ));
+    output( "%s.mo: %s\n", obj_dir_path( make, obj ), source_file );
+    output( "\t%s%s -o $@ %s\n", cmd_prefix( "MSG" ), msgfmt, source_file );
     strarray_add( &make->all_targets[0], strmake( "%s.mo", obj ));
 }
 
@@ -4738,6 +4742,7 @@ int main( int argc, char *argv[] )
         top_install[i] = get_expanded_make_var_array( top_makefile, strmake( "TOP_%s", install_variables[i] ));
 
     root_src_dir       = get_expanded_make_variable( top_makefile, "srcdir" );
+    po_src_dir         = get_expanded_make_variable( top_makefile, "podir" );
     tools_dir          = get_expanded_make_variable( top_makefile, "toolsdir" );
     tools_ext          = get_expanded_make_variable( top_makefile, "toolsext" );
     wine64_dir         = get_expanded_make_variable( top_makefile, "wine64dir" );
