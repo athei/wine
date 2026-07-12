@@ -69,6 +69,9 @@
 # include <mach/mach.h>
 # include <mach/mach_error.h>
 # include <mach-o/getsect.h>
+# include <servers/bootstrap.h>
+# include <libkern/OSCacheControl.h>
+# include "coop_proto.h"
 # include <crt_externs.h>
 # ifndef _POSIX_SPAWN_DISABLE_ASLR
 #  define _POSIX_SPAWN_DISABLE_ASLR 0x0100
@@ -700,8 +703,236 @@ static void replace_wineloader_path_with_link(char **wineloader_path, const char
 #endif
 
 
-static void preloader_exec( char **argv, const char *image_path )
+/* Read the machine field from a PE file's headers.
+ * Returns IMAGE_FILE_MACHINE_UNKNOWN if the file can't be read or isn't PE. */
+static WORD get_pe_file_machine( const char *path )
 {
+    IMAGE_DOS_HEADER dos;
+    IMAGE_FILE_HEADER file_header;
+    DWORD signature;
+    WORD ret = IMAGE_FILE_MACHINE_UNKNOWN;
+    int fd = open( path, O_RDONLY );
+
+    if (fd == -1) return ret;
+    if (pread( fd, &dos, sizeof(dos), 0 ) == sizeof(dos) &&
+        dos.e_magic == IMAGE_DOS_SIGNATURE &&
+        pread( fd, &signature, sizeof(signature), dos.e_lfanew ) == sizeof(signature) &&
+        signature == IMAGE_NT_SIGNATURE &&
+        pread( fd, &file_header, sizeof(file_header),
+               dos.e_lfanew + sizeof(signature) ) == sizeof(file_header))
+        ret = file_header.Machine;
+    close( fd );
+    return ret;
+}
+
+/***********************************************************************
+ *           get_x87_sidecar_path
+ *
+ * The x87sidecar that i386 processes are started under: ROSETTA_X87_PATH if
+ * it is set, none if it is set but empty, otherwise the x87sidecar installed
+ * next to wine in bin_dir, if there is one. Only an x86_64 build, which runs
+ * under Rosetta on Apple silicon, looks for the installed one.
+ */
+const char *get_x87_sidecar_path(void)
+{
+    const char *path = getenv( "ROSETTA_X87_PATH" );
+
+    if (path) return *path ? path : NULL;
+#if defined(__APPLE__) && defined(__x86_64__)
+    {
+        static char *bundled;
+
+        if (!bin_dir) return NULL;
+        if (!bundled) bundled = build_path( bin_dir, "x87sidecar" );
+        return access( bundled, X_OK ) ? NULL : bundled;
+    }
+#else
+    return NULL;
+#endif
+}
+
+/* Whether to start this process under the x87sidecar: -1 undecided, 0 no,
+ * 1 yes. spawn_process sets it in the child, together with the sidecar to
+ * use, from what the parent decided; the first process of a launch decides
+ * for itself in preloader_exec. The path is copied into a static buffer so
+ * that the child does not allocate memory for it between fork and exec. */
+static int compat_x87 = -1;
+static char compat_x87_sidecar[PATH_MAX];
+
+void set_compat_x87( int value, const char *sidecar )
+{
+    compat_x87 = value;
+    if (!value) return;
+    if (!sidecar || strlen( sidecar ) >= sizeof(compat_x87_sidecar)) compat_x87 = 0;
+    else strcpy( compat_x87_sidecar, sidecar );
+}
+
+/***********************************************************************
+ *           get_compatdb_env
+ *
+ * Return what the compatdb_query_env function query writes for path, the env
+ * of the rules that match the executable, in a buffer allocated with malloc,
+ * or NULL if there are no entries.
+ */
+static char *get_compatdb_env( int (*query)( const char *, char *, size_t ), const char *path )
+{
+    char *buf, *new_buf;
+    int size = 1024, ret, tries;
+
+    if (!(buf = malloc( size ))) return NULL;
+    for (tries = 0; tries < 3; tries++)
+    {
+        if ((ret = query( path, buf, size )) <= 0) break;
+        if (ret <= size) return buf;
+        if (!(new_buf = realloc( buf, ret ))) break;
+        buf = new_buf;
+        size = ret;
+    }
+    free( buf );
+    return NULL;
+}
+
+/***********************************************************************
+ *           apply_compatdb_env
+ *
+ * Set the NAME=value entries returned by get_compatdb_env in the unix
+ * environment, in order. An empty value unsets the variable. The buffer is
+ * modified.
+ */
+void apply_compatdb_env( char *env )
+{
+    char *name, *value;
+
+    if (!env) return;
+    for (name = env; *name; name = value + strlen( value ) + 1)
+    {
+        if (!(value = strchr( name, '=' ))) break;
+        *value++ = 0;
+        if (*value) setenv( name, value, 1 );
+        else unsetenv( name );
+    }
+}
+
+/* Non-zero while compatdb.so is loaded only to answer a query before ntdll
+ * is initialized. Its initializer checks this and does nothing then. */
+static int compatdb_preinit;
+
+__attribute__((visibility("default")))
+int compatdb_preinit_query(void)
+{
+    return compatdb_preinit;
+}
+
+/***********************************************************************
+ *           query_compatdb_preinit
+ *
+ * Ask compatdb.so about the executable named by path, from a process in which
+ * ntdll is not initialized yet. Unless x87 is NULL, store there whether the
+ * x87sidecar should run it: 1 for yes, 0 for no, -1 if the library has no
+ * opinion or cannot be loaded. Return the env of its rules as
+ * get_compatdb_env does.
+ */
+static char *query_compatdb_preinit( const char *path, int *x87 )
+{
+    int (*query_x87)( const char * );
+    int (*query_env)( const char *, char *, size_t );
+    char *name = NULL, *env = NULL;
+    void *handle;
+
+    if (x87) *x87 = -1;
+    if (!ntdll_dir) return NULL;
+    asprintf( &name, "%s/compatdb.so", ntdll_dir );
+    if (!name) return NULL;
+    compatdb_preinit = 1;
+    if ((handle = dlopen( name, RTLD_NOW | RTLD_LOCAL )))
+    {
+        if (x87 && (query_x87 = dlsym( handle, "compatdb_query_x87" ))) *x87 = query_x87( path );
+        if ((query_env = dlsym( handle, "compatdb_query_env" ))) env = get_compatdb_env( query_env, path );
+        dlclose( handle );
+    }
+    compatdb_preinit = 0;
+    free( name );
+    return env;
+}
+
+/***********************************************************************
+ *           get_dos_drive_unix_path
+ *
+ * Map a DOS path with a drive letter, X:\dir\file, to the unix path
+ * <config_dir>/dosdevices/x:/dir/file and resolve it with realpath. Returns
+ * NULL if arg is not such a path or the file does not exist.
+ */
+static char *get_dos_drive_unix_path( const char *arg )
+{
+    char drive = arg[0] | 0x20, *path = NULL, *p, *ret;
+
+    if (!config_dir || drive < 'a' || drive > 'z' || arg[1] != ':') return NULL;
+    asprintf( &path, "%s/dosdevices/%c:/%s", config_dir, drive, arg + 2 );
+    if (!path) return NULL;
+    for (p = path + strlen( config_dir ); *p; p++) if (*p == '\\') *p = '/';
+    ret = realpath( path, NULL );
+    free( path );
+    return ret;
+}
+
+/***********************************************************************
+ *           get_first_process_target
+ *
+ * The first process of a launch is given the program to run as its first
+ * argument, arg. build_initial_params runs it directly only if it names an
+ * existing PE file; for anything else, a bare name like "game" or "cmd"
+ * included, it runs the 64-bit start.exe, which starts the program as a child.
+ * Return the real unix path and PE machine of an existing file, given as a
+ * unix path or as a DOS path with a drive letter, and the 64-bit machine for
+ * start.exe. A DOS path that cannot be resolved is returned as given with an
+ * unknown machine.
+ */
+static void get_first_process_target( const char *arg, const char **target, WORD *machine )
+{
+    char *path;
+
+    *target = arg;
+    *machine = IMAGE_FILE_MACHINE_UNKNOWN;
+    if ((path = realpath( arg, NULL )) || (path = get_dos_drive_unix_path( arg )))
+    {
+        *target = path;
+        if (!(*machine = get_pe_file_machine( path ))) *machine = current_machine;
+    }
+    else if (!strchr( arg, '\\' ) && !(arg[0] && arg[1] == ':')) *machine = current_machine;
+}
+
+static void preloader_exec( char **argv, const char *image_path, WORD machine )
+{
+    const char *rosetta_path, *target = NULL;
+    WORD target_machine = IMAGE_FILE_MACHINE_UNKNOWN;
+
+    /* The first process of a launch, which no parent has decided for. It runs
+     * the program named by its first argument, or start.exe, which can differ
+     * from the first .exe in argv (wine start /unix game.exe runs start.exe).
+     * Ask compatdb.so once about that program and set the env of its rules
+     * now, so that the x87sidecar sees it too. Nothing 64-bit needs the
+     * sidecar; otherwise attach unless compatdb.so says no. The sidecar is
+     * fixed before the env is set, as the parent does for a child. */
+    if (compat_x87 == -1 && argv[2])
+    {
+        const char *sidecar = get_x87_sidecar_path();
+        int x87 = 0;
+        char *env;
+
+        get_first_process_target( argv[2], &target, &target_machine );
+        if (machine == IMAGE_FILE_MACHINE_I386 && sidecar &&
+            (target_machine == IMAGE_FILE_MACHINE_UNKNOWN ||
+             target_machine == IMAGE_FILE_MACHINE_I386))
+        {
+            env = query_compatdb_preinit( target, &x87 );
+            if (!x87) WARN( "compatdb.so keeps the x87sidecar away from %s\n", target );
+        }
+        else env = query_compatdb_preinit( target, NULL );
+        set_compat_x87( x87 ? 1 : 0, sidecar );
+        apply_compatdb_env( env );
+        free( env );
+    }
+
 #ifdef HAVE_WINE_PRELOADER
     asprintf( &argv[0], "%s-preloader", argv[1] );
 #ifdef __APPLE__
@@ -732,6 +963,72 @@ static void preloader_exec( char **argv, const char *image_path )
         replace_wineloader_path_with_link( &(argv[1]), image_path );
 #endif
 
+    /* HACK: re-exec i386 processes through the x87sidecar (ROSETTA_X87_PATH,
+     * or the one installed in bin_dir) so its x87 JIT hook is installed, unless
+     * the parent or compatdb.so decided against it. Note that argv[1] is
+     * always an existing loader here: get_alternate_wineloader() verifies the
+     * path it returns, so loader_exec's speculative first call can't hand us a
+     * nonexistent loader that the sidecar would then fail to exec. */
+    if (!compat_x87) rosetta_path = NULL;
+    else if (compat_x87_sidecar[0]) rosetta_path = compat_x87_sidecar;  /* chosen at launch or by the parent */
+    else rosetta_path = get_x87_sidecar_path();
+    if (machine == IMAGE_FILE_MACHINE_I386 && rosetta_path)
+    {
+        /* Find the Windows EXE in argv, for the log message and to check its
+         * architecture. In a child started by spawn_process argv holds the
+         * Windows command line, the parent has already decided from the image
+         * (compat_x87 is 0 or 1), and the machine parameter is authoritative,
+         * so a target that cannot be read here (a DOS path, a builtin) counts
+         * as i386. In the first process of a launch the machine parameter is
+         * always i386, because reexec_loader probes for a 32-bit loader, so the
+         * target was determined above from the first argument. A target
+         * whose PE header says it is not i386 never gets the sidecar. */
+        int i;
+        if (!target)
+        {
+            target = image_path;
+            for (i = 2; argv[i]; i++)
+            {
+                const char *p = argv[i];
+                size_t len = strlen( p );
+                if (len >= 4 && !strcasecmp( p + len - 4, ".exe" ))
+                {
+                    target = p;
+                    target_machine = get_pe_file_machine( p );
+                    break;
+                }
+            }
+        }
+        /* Always run the sidecar in cooperative mode: it attaches via a
+         * voluntary task-port handshake (performed by x87_cooperative_handshake()
+         * in the re-exec'd tracee) instead of task_for_pid + ptrace, so the
+         * sidecar needs no get-task-allow entitlement and the bundle stays
+         * notarizable. Insert "--cooperative" as the first sidecar argument:
+         * [rosettax87, --cooperative, loader, ...]. */
+        if (compat_x87 &&
+            (target_machine == IMAGE_FILE_MACHINE_UNKNOWN ||
+             target_machine == IMAGE_FILE_MACHINE_I386))
+        {
+            static char coop_flag[] = "--cooperative";
+            const char *env_path;
+            char **coop_argv;
+            int n;
+
+            /* argv[0] is the (unused, possibly NULL) preloader slot; the real
+             * program + args are argv[1..], so count and copy from index 1. */
+            for (n = 1; argv[n]; n++) {}
+            coop_argv = malloc( (n + 2) * sizeof(*coop_argv) );
+            coop_argv[0] = strdup( rosetta_path );
+            coop_argv[1] = coop_flag;
+            for (i = 1; i <= n; i++) coop_argv[i + 1] = argv[i]; /* copies argv[1..] + NULL terminator */
+            env_path = getenv( "ROSETTA_X87_PATH" );
+            ERR( "%s: attaching rosettax87 --cooperative (%s) for %s\n",
+                 env_path && !strcmp( env_path, rosetta_path ) ? "ROSETTA_X87_PATH" : "x87sidecar",
+                 rosetta_path, target );
+            execv( coop_argv[0], coop_argv );
+        }
+    }
+
     execv( argv[1], argv + 1 );
 }
 
@@ -742,10 +1039,10 @@ static NTSTATUS loader_exec( char **argv, WORD machine, const char *image_path )
 
     putenv( noexec );
 
-    if (((argv[1] = get_alternate_wineloader( machine )))) preloader_exec( argv, image_path );
+    if (((argv[1] = get_alternate_wineloader( machine )))) preloader_exec( argv, image_path, machine );
 
     argv[1] = strdup( wineloader );
-    preloader_exec( argv, image_path );
+    preloader_exec( argv, image_path, machine );
     return STATUS_INVALID_IMAGE_FORMAT;
 }
 
@@ -2275,6 +2572,40 @@ static void hook(void *to_hook, const void *replace)
 }
 #endif
 
+static void *compatdb;
+
+/***********************************************************************
+ *           query_compatdb_x87
+ *
+ * Ask the compatdb.so loaded in this process whether the x87sidecar should
+ * run the executable at unix_path. Returns 1 for yes, 0 for no, -1 if the
+ * library has no opinion or is not loaded.
+ */
+int query_compatdb_x87( const char *unix_path )
+{
+    static int (*query)( const char * );
+
+    if (!compatdb) return -1;
+    if (!query && !(query = dlsym( compatdb, "compatdb_query_x87" ))) return -1;
+    return query( unix_path );
+}
+
+/***********************************************************************
+ *           query_compatdb_env
+ *
+ * Ask the compatdb.so loaded in this process for the env of the rules that
+ * match the executable named by path. Returns it as get_compatdb_env does,
+ * or NULL if the library or the function is missing.
+ */
+char *query_compatdb_env( const char *path )
+{
+    static int (*query)( const char *, char *, size_t );
+
+    if (!compatdb) return NULL;
+    if (!query && !(query = dlsym( compatdb, "compatdb_query_env" ))) return NULL;
+    return get_compatdb_env( query, path );
+}
+
 /***********************************************************************
  *           start_main_thread
  */
@@ -2307,14 +2638,13 @@ static void start_main_thread(void)
 
     /* CW Hack 24067 */
     {
-        void *cxcompatdb = NULL;
         char *name = NULL;
 
         asprintf( &name, "%s/compatdb.so", ntdll_dir );
         if (name)
         {
-            cxcompatdb = dlopen( name, RTLD_LOCAL | RTLD_LAZY );
-            if (!cxcompatdb)
+            compatdb = dlopen( name, RTLD_LOCAL | RTLD_LAZY );
+            if (!compatdb)
                 WARN( "error loading compatdb.so: %s\n", dlerror() );
             free(name);
         }
@@ -2671,6 +3001,145 @@ static void check_command_line( int argc, char *argv[] )
 }
 
 
+#ifdef __APPLE__
+/* HACK: tell the user that the x87sidecar did not install its hook. This is
+ * printed unconditionally, so that it shows even with WINEDEBUG=-all. The
+ * sidecar prints a banner with the same "RUNNING WITHOUT X87 ACCELERATION" text
+ * when it gives up on its own side. */
+static void x87_coop_unhooked( const char *reason )
+{
+    fprintf( stderr,
+             "################################################################\n"
+             "WARNING: X87SIDECAR DID NOT FINISH (%s).\n"
+             "THIS PROCESS IS RUNNING WITHOUT X87 ACCELERATION.\n"
+             "32-BIT GAMES THAT USE X87 MATH WILL BE MUCH SLOWER.\n"
+             "################################################################\n",
+             reason );
+}
+
+/***********************************************************************
+ *           x87_cooperative_handshake
+ *
+ * HACK: tracee side of the cooperative x87sidecar attach.
+ *
+ * When wine has re-exec'd itself through `x87sidecar --cooperative` (see
+ * preloader_exec), the sidecar publishes a Mach
+ * receive port in the bootstrap namespace under the name in X87_SIDECAR_BOOTSTRAP
+ * ("x87sidecar.<pid>"). This runs in the Rosetta-translated tracee: look the
+ * service up, hand over our task + main-thread control ports, and block until
+ * the sidecar has installed its x87 JIT hook and replies. The reply carries the
+ * code ranges the sidecar patched so we invalidate our OWN instruction cache for
+ * them: a cross-process flush is not reliable once translate_insn is already
+ * hot. This replaces task_for_pid + ptrace, so the sidecar needs no
+ * com.apple.security.get-task-allow entitlement and the bundle stays notarizable.
+ *
+ * A no-op unless X87_SIDECAR_BOOTSTRAP is set and names THIS pid, so it is inert
+ * in the ordinary (non-cooperative) loader and in unrelated wine processes that
+ * merely inherited the env var. Mirrors x87sidecar tests/coop_handshake.c.
+ */
+static void x87_cooperative_handshake(void)
+{
+    char *name = getenv( X87_COOP_ENV );
+    mach_port_t bootstrap_port = MACH_PORT_NULL;
+    mach_port_t service = MACH_PORT_NULL;
+    mach_port_t reply = MACH_PORT_NULL;
+    x87_coop_request_t msg;
+    struct {
+        x87_coop_reply_t reply;
+        mach_msg_trailer_t trailer;
+        char slack[64];
+    } rep;
+    kern_return_t kr;
+    char reason[64] = "";
+    char *dot;
+    int i;
+
+    if (!name || !*name) return;  /* not running under --cooperative */
+
+    /* Staleness guard: the service name embeds the intended tracee pid. A
+     * process that merely inherited the env var (the host loader, wineserver,
+     * an unrelated child) must not hand over its own task port. */
+    dot = strrchr( name, '.' );
+    if (!dot || atoi( dot + 1 ) != (int)getpid()) return;
+
+    if ((kr = task_get_bootstrap_port( mach_task_self(), &bootstrap_port )) != KERN_SUCCESS)
+    {
+        snprintf( reason, sizeof(reason), "NO BOOTSTRAP PORT, ERROR 0X%X", kr );
+        goto done;
+    }
+    kr = bootstrap_look_up( bootstrap_port, name, &service );
+    if (kr != KERN_SUCCESS)
+    {
+        snprintf( reason, sizeof(reason), "SIDECAR SERVICE NOT FOUND, ERROR 0X%X", kr );
+        goto done;
+    }
+
+    /* Reply port we block on until the sidecar has finished its setup. */
+    mach_port_allocate( mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &reply );
+
+    memset( &msg, 0, sizeof(msg) );
+    msg.header.msgh_bits = MACH_MSGH_BITS( MACH_MSG_TYPE_COPY_SEND, MACH_MSG_TYPE_MAKE_SEND_ONCE ) |
+                           MACH_MSGH_BITS_COMPLEX;
+    msg.header.msgh_size = sizeof(msg);
+    msg.header.msgh_remote_port = service;  /* destination: sidecar */
+    msg.header.msgh_local_port = reply;     /* reply right -> send-once to sidecar */
+    msg.header.msgh_id = X87_COOP_MSGH_ID;
+    msg.body.msgh_descriptor_count = 2;
+    msg.task_port.name = mach_task_self();
+    msg.task_port.disposition = MACH_MSG_TYPE_COPY_SEND;
+    msg.task_port.type = MACH_MSG_PORT_DESCRIPTOR;
+    msg.thread_port.name = mach_thread_self();
+    msg.thread_port.disposition = MACH_MSG_TYPE_COPY_SEND;
+    msg.thread_port.type = MACH_MSG_PORT_DESCRIPTOR;
+
+    kr = mach_msg( &msg.header, MACH_SEND_MSG, sizeof(msg), 0, MACH_PORT_NULL,
+                   MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL );
+    if (kr != KERN_SUCCESS)
+    {
+        snprintf( reason, sizeof(reason), "HANDSHAKE SEND FAILED, ERROR 0X%X", kr );
+        goto done;
+    }
+
+    /* Block until the sidecar has done its install and replies. The receive
+     * buffer needs room for the header AND the kernel-appended trailer. If the
+     * sidecar exits without replying, the kernel sends a MACH_NOTIFY_SEND_ONCE
+     * notification to the reply port instead, which has a different id and
+     * size. */
+    memset( &rep, 0, sizeof(rep) );
+    kr = mach_msg( &rep.reply.header, MACH_RCV_MSG, 0, sizeof(rep), reply,
+                   MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL );
+
+    if (kr != KERN_SUCCESS)
+        snprintf( reason, sizeof(reason), "RECEIVE FAILED, ERROR 0X%X", kr );
+    else if (rep.reply.header.msgh_id == MACH_NOTIFY_SEND_ONCE)
+        snprintf( reason, sizeof(reason), "THE SIDECAR EXITED WITHOUT REPLYING" );
+    else if (rep.reply.header.msgh_id != X87_COOP_MSGH_ID + 1 ||
+             rep.reply.header.msgh_size != sizeof(rep.reply))
+        snprintf( reason, sizeof(reason), "UNEXPECTED REPLY, ID 0X%X SIZE %u",
+                  rep.reply.header.msgh_id, rep.reply.header.msgh_size );
+    else
+    {
+        /* Invalidate our own i-cache for the code the sidecar patched. This runs
+         * on the same thread that will execute translate_insn, and
+         * sys_icache_invalidate issues a broadcast (inner-shareable) IC IVAU,
+         * which a cross-process flush from the sidecar does not reliably
+         * achieve once translate_insn is hot. */
+        for (i = 0; i < 2; i++)
+            if (rep.reply.icache_len[i] != 0)
+                sys_icache_invalidate( (void *)(uintptr_t)rep.reply.icache_addr[i],
+                                       (size_t)rep.reply.icache_len[i] );
+    }
+
+done:
+    /* Destroy the reply port, so that a late reply finds no receiver. */
+    if (reply != MACH_PORT_NULL) mach_port_mod_refs( mach_task_self(), reply, MACH_PORT_RIGHT_RECEIVE, -1 );
+    if (service != MACH_PORT_NULL) mach_port_deallocate( mach_task_self(), service );
+    if (reason[0]) x87_coop_unhooked( reason );
+    unsetenv( X87_COOP_ENV );
+}
+#endif
+
+
 /***********************************************************************
  *           __wine_main
  *
@@ -2680,6 +3149,12 @@ DECLSPEC_EXPORT void __wine_main( int argc, char *argv[] )
 {
     main_argc = argc;
     main_argv = argv;
+
+#ifdef __APPLE__
+    /* HACK: if we were launched under `x87sidecar --cooperative`, hand our
+     * task port to the sidecar and wait for its x87 JIT hook before running. */
+    x87_cooperative_handshake();
+#endif
 
     init_paths();
     if (!getenv( "WINELOADERNOEXEC" ) || argc <= 1) check_command_line( argc, argv );
