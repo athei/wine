@@ -647,8 +647,13 @@ static BOOL start_debugger( EXCEPTION_POINTERS *epointers, HANDLE event )
     TRACE( "Starting debugger %s\n", debugstr_w(cmdline) );
     memset( &startup, 0, sizeof(startup) );
     startup.cb = sizeof(startup);
-    startup.dwFlags = STARTF_USESHOWWINDOW;
+    /* Keep automatic debugger output on the crashing process's handles instead
+     * of replacing them with a newly allocated console's handles. */
+    startup.dwFlags = STARTF_USESHOWWINDOW | STARTF_USESTDHANDLES;
     startup.wShowWindow = SW_SHOWNORMAL;
+    startup.hStdInput = GetStdHandle( STD_INPUT_HANDLE );
+    startup.hStdOutput = GetStdHandle( STD_OUTPUT_HANDLE );
+    startup.hStdError = GetStdHandle( STD_ERROR_HANDLE );
     ret = CreateProcessW( NULL, cmdline, NULL, NULL, TRUE, CREATE_UNICODE_ENVIRONMENT, env, NULL, &startup, &info );
     FreeEnvironmentStringsW( env );
 
