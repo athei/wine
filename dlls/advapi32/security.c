@@ -2768,6 +2768,24 @@ static int is_battle_net_agent(void)
     return status;
 }
 
+/* CW HACK 27245 */
+static int is_epic_games_launcher(void)
+{
+    static int status = -1;
+    if (status == -1)
+    {
+        WCHAR name[MAX_PATH], *module_exe;
+        if (GetModuleFileNameW(NULL, name, ARRAYSIZE(name)))
+        {
+            module_exe = wcsrchr(name, '\\');
+            module_exe = module_exe ? module_exe + 1 : name;
+            status = !wcsicmp(module_exe, L"EpicGamesLauncher.exe");
+        }
+    }
+
+    return status;
+}
+
 /* CW HACK 23881 */
 /* Assumes orig_sd is self-relative. Returns a new self-relative SD. */
 static PSECURITY_DESCRIPTOR replace_dacl_and_owner(PSECURITY_DESCRIPTOR orig_sd, PACL new_dacl, PSID new_owner)
@@ -2829,8 +2847,8 @@ done:
 }
 
 /* CW HACK 23881 */
-void hack_battle_net_sd(PSID* owner, PSID* group, PACL* dacl,
-                        PACL* sacl, PSECURITY_DESCRIPTOR* descriptor)
+void hack_launcher_sd(PSID* owner, PSID* group, PACL* dacl,
+                      PACL* sacl, PSECURITY_DESCRIPTOR* descriptor)
 {
     SID *sid;
     SID_IDENTIFIER_AUTHORITY auth = { SECURITY_NT_AUTHORITY };
@@ -2842,7 +2860,7 @@ void hack_battle_net_sd(PSID* owner, PSID* group, PACL* dacl,
     PSECURITY_DESCRIPTOR old_sd, new_sd;
     DWORD err;
 
-    WARN("HACK: adjusting owner and ACLs for a Battle.net directory\n");
+    WARN("HACK: adjusting owner and ACLs for Battle.net/Epic\n");
 
     for (i = 0; i < 3; i++)
     {
@@ -2962,16 +2980,16 @@ DWORD WINAPI GetNamedSecurityInfoW( const WCHAR *name, SE_OBJECT_TYPE type,
             err = GetSecurityInfo( handle, type, info, owner, group, dacl, sacl, descriptor );
             CloseHandle( handle );
 
-            /* CW HACK 23881: The Battle.net launcher requires that everything under these
-               directories have certain owners and ACLs. */
-            if (err == ERROR_SUCCESS &&
-                descriptor &&
-                is_battle_net_agent() &&
-                (wcsstr( name, L"/ProgramData/Battle.net/Agent" ) ||
-                 wcsstr( name, L"\\ProgramData\\Battle.net_components" ) ||
-                 wcsstr( name, L"/Program Files (x86)/Battle.net" )))
+            /* CW HACK 23881 & 27245: The Battle.net launcher requires that everything under these
+               directories have certain owners and ACLs, and Epic needs it everywhere. */
+            if (err == ERROR_SUCCESS && descriptor &&
+                (is_epic_games_launcher() ||
+                 (is_battle_net_agent() &&
+                  (wcsstr( name, L"/ProgramData/Battle.net/Agent" ) ||
+                   wcsstr( name, L"\\ProgramData\\Battle.net_components" ) ||
+                   wcsstr( name, L"/Program Files (x86)/Battle.net" )))))
             {
-                hack_battle_net_sd( owner, group, dacl, sacl, descriptor );
+                hack_launcher_sd( owner, group, dacl, sacl, descriptor );
             }
         }
         break;
