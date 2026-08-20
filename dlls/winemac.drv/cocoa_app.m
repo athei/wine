@@ -2467,8 +2467,53 @@ static NSString* WineLocalizedString(unsigned int stringID)
         forceNextMouseMoveAbsolute = TRUE;
     }
 
+    /* The parts of the screen configuration that Wine's view of the displays
+       depends on: which screens exist, where they are, their work areas,
+       their backing scale and their CG display mode. */
+    - (NSArray*) currentScreenConfiguration
+    {
+        NSMutableArray* config = [NSMutableArray array];
+        NSScreen* screen;
+
+        for (screen in [NSScreen screens])
+        {
+            NSNumber* displayID = [screen.deviceDescription objectForKey:@"NSScreenNumber"];
+            CGDisplayModeRef mode = CGDisplayCopyDisplayMode([displayID unsignedIntValue]);
+            NSMutableDictionary* entry = [NSMutableDictionary dictionaryWithObjectsAndKeys:
+                displayID ? displayID : (id)[NSNull null], @"id",
+                NSStringFromRect([screen frame]), @"frame",
+                NSStringFromRect([screen visibleFrame]), @"visibleFrame",
+                [NSNumber numberWithDouble:[screen backingScaleFactor]], @"scale",
+                nil];
+            if (mode)
+            {
+                [entry setObject:(id)mode forKey:@"mode"];
+                CGDisplayModeRelease(mode);
+            }
+            [config addObject:entry];
+        }
+
+        return config;
+    }
+
     - (void)applicationDidChangeScreenParameters:(NSNotification *)notification
     {
+        NSArray* config = [self currentScreenConfiguration];
+
+        /* macOS posts this notification for much more than display topology
+           or mode changes: on an EDR display every step of the headroom
+           ramp (which follows ambient light, thermal state and on-screen
+           content) arrives as one, at up to the refresh rate.  Each one
+           used to cost a full display re-enumeration in the desktop
+           process, a display-cache invalidation in every process and a
+           window-level pass here, with the main thread busy while other
+           threads wait on it for SetCapture or SetCursorPos.  Only react
+           when something Wine actually depends on changed. */
+        if (lastScreenConfiguration && [lastScreenConfiguration isEqualToArray:config])
+            return;
+        [lastScreenConfiguration release];
+        lastScreenConfiguration = [config retain];
+
         primaryScreenHeightValid = FALSE;
         [self sendDisplaysChanged:FALSE];
         [self adjustWindowLevels];
