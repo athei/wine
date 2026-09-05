@@ -1323,6 +1323,7 @@ LRESULT macdrv_DesktopWindowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 void macdrv_DestroyWindow(HWND hwnd)
 {
     struct macdrv_win_data *data;
+    CFMutableArrayRef d3dmetal_client_surfaces;
 
     TRACE("%p\n", hwnd);
 
@@ -1334,11 +1335,19 @@ void macdrv_DestroyWindow(HWND hwnd)
     destroy_cocoa_window(data);
 
     /* CW HACK 22435 */
-    if (data->d3dmetal_client_surfaces) CFRelease(data->d3dmetal_client_surfaces);
+    d3dmetal_client_surfaces = data->d3dmetal_client_surfaces;
+    data->d3dmetal_client_surfaces = NULL;
 
     CFDictionaryRemoveValue(win_datas, hwnd);
     release_win_data(data);
     free(data);
+
+    /* Releasing a client surface takes win32u's surface lock, and the other
+     * holders of that lock (detach_client_surfaces, update_client_surfaces)
+     * call back into this driver for the window data, so it must not happen
+     * while the window data is held: two threads, one destroying its window
+     * and one creating, moving or destroying its own, would deadlock. */
+    if (d3dmetal_client_surfaces) CFRelease(d3dmetal_client_surfaces);
 }
 
 
