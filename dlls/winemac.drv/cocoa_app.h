@@ -59,6 +59,7 @@ enum {
 
     CGFloat primaryScreenHeight;
     BOOL primaryScreenHeightValid;
+    NSArray* lastScreenConfiguration;
     NSMutableData* screenFrameCGRects;
 
     WineWindow* lastTargetWindow;
