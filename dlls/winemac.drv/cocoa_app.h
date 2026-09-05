@@ -81,6 +81,8 @@ enum {
     int         cursorFrame;
     NSTimer*    cursorTimer;
     NSCursor*   cursor;
+    NSArray*    builtCursorFrames;
+    int         builtCursorFrame;
     BOOL        cursorIsCurrent;
     BOOL        cursorHidden;
     BOOL        clientWantsCursorHidden;
