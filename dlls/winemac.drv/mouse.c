@@ -742,12 +742,37 @@ static BOOL get_icon_info(HICON handle, ICONINFOEXW *ret)
 
 
 /***********************************************************************
+ *              get_cursor_scale
+ *
+ * Return the factor by which a window is DPI virtualized: its monitor's
+ * effective DPI divided by the window's own DPI.  This is 2 for a
+ * DPI-unaware window on a 192 DPI monitor and 1 for a DPI-aware window.
+ * Scaling the cursor shown over the window by the same factor keeps it in
+ * proportion to the contents.  The stretch of an emulated display mode is
+ * left out on purpose, so a cursor in an emulated mode keeps its size.
+ */
+static CGFloat get_cursor_scale(HWND hwnd)
+{
+    UINT dpi, monitor_dpi;
+    CGFloat scale;
+
+    if (!hwnd || !(dpi = NtUserGetDpiForWindow(hwnd))) return 1;
+    if (!(monitor_dpi = NtUserGetWinMonitorDpi(hwnd, MDT_EFFECTIVE_DPI))) return 1;
+
+    scale = (CGFloat)monitor_dpi / dpi;
+    TRACE("hwnd %p dpi %u monitor_dpi %u scale %g\n", hwnd, dpi, monitor_dpi, scale);
+    return min(max(scale, 1), 8);
+}
+
+
+/***********************************************************************
  *              SetCursor (MACDRV.@)
  */
 void macdrv_SetCursor(HWND hwnd, HCURSOR cursor)
 {
     CFStringRef cursor_name = NULL;
     CFArrayRef cursor_frames = NULL;
+    CGFloat scale = 1;
 
     TRACE("%p %p\n", hwnd, cursor);
 
@@ -827,8 +852,13 @@ void macdrv_SetCursor(HWND hwnd, HCURSOR cursor)
     }
 
 done:
-    TRACE("setting cursor with cursor_name %s cursor_frames %p\n", debugstr_cf(cursor_name), cursor_frames);
-    macdrv_set_cursor(cursor_name, cursor_frames);
+    /* The cached frames hold the bitmaps at their own size.  The scale is
+       applied on the Cocoa side, so the same frames serve windows with
+       different scaling. */
+    if (cursor_frames) scale = get_cursor_scale(hwnd);
+    TRACE("setting cursor with cursor_name %s cursor_frames %p scale %g\n", debugstr_cf(cursor_name),
+          cursor_frames, scale);
+    macdrv_set_cursor(cursor_name, cursor_frames, scale);
     if (cursor_name) CFRelease(cursor_name);
     if (cursor_frames) CFRelease(cursor_frames);
 }

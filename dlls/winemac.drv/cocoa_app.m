@@ -221,6 +221,7 @@ static NSString* WineLocalizedString(unsigned int stringID)
         [clipCursorHandler release];
         [cursorTimer release];
         [cursorFrames release];
+        [builtCursorFrames release];
         [latentDisplayModes release];
         [originalDisplayModes release];
         [keyWindows release];
@@ -1039,38 +1040,65 @@ static NSString* WineLocalizedString(unsigned int stringID)
         return ([originalDisplayModes count] > 0 || displaysCapturedForFullscreen);
     }
 
+    /* A fully transparent cursor, set instead of [NSCursor hide].
+       Toggling the cursor plane off and on makes the window server present
+       the next frames of a full-screen Metal layer one refresh late, which
+       a game hiding the cursor while a mouse button is held turns into a
+       sustained frame-rate drop under rapid clicking (measured 120 -> ~107
+       fps; with the toggle gone the rate holds).  Swapping the cursor
+       image has no such cost, so hidden = blank image, plane always on. */
+    static NSCursor* blank_cursor(void)
+    {
+        static NSCursor* blank;
+        if (!blank)
+        {
+            NSBitmapImageRep* rep = [[NSBitmapImageRep alloc]
+                initWithBitmapDataPlanes:NULL
+                              pixelsWide:1
+                              pixelsHigh:1
+                           bitsPerSample:8
+                         samplesPerPixel:4
+                                hasAlpha:YES
+                                isPlanar:NO
+                          colorSpaceName:NSDeviceRGBColorSpace
+                             bytesPerRow:4
+                            bitsPerPixel:32];
+            NSImage* image = [[NSImage alloc] initWithSize:NSMakeSize(1, 1)];
+            memset([rep bitmapData], 0, 4);
+            [image addRepresentation:rep];
+            [rep release];
+            blank = [[NSCursor alloc] initWithImage:image hotSpot:NSZeroPoint];
+            [image release];
+        }
+        return blank;
+    }
+
     - (void) updateCursor:(BOOL)force
     {
         if (force || lastTargetWindow)
         {
-            if (clientWantsCursorHidden && !cursorHidden)
+            if (clientWantsCursorHidden)
             {
-                [NSCursor hide];
-                cursorHidden = TRUE;
+                if (!cursorHidden || [NSCursor currentCursor] != blank_cursor())
+                {
+                    [blank_cursor() set];
+                    cursorIsCurrent = FALSE;
+                    cursorHidden = TRUE;
+                }
             }
-
-            if (!cursorIsCurrent)
+            else if (!cursorIsCurrent || cursorHidden || [NSCursor currentCursor] != cursor)
             {
                 [cursor set];
                 cursorIsCurrent = TRUE;
-            }
-
-            if (!clientWantsCursorHidden && cursorHidden)
-            {
-                [NSCursor unhide];
                 cursorHidden = FALSE;
             }
         }
         else
         {
-            if (cursorIsCurrent)
+            if (cursorIsCurrent || cursorHidden)
             {
                 [[NSCursor arrowCursor] set];
                 cursorIsCurrent = FALSE;
-            }
-            if (cursorHidden)
-            {
-                [NSCursor unhide];
                 cursorHidden = FALSE;
             }
         }
@@ -1098,6 +1126,8 @@ static NSString* WineLocalizedString(unsigned int stringID)
     {
         if (newCursor != cursor)
         {
+            [builtCursorFrames release];
+            builtCursorFrames = nil;
             [cursor release];
             cursor = [newCursor retain];
             cursorIsCurrent = FALSE;
@@ -1109,16 +1139,22 @@ static NSString* WineLocalizedString(unsigned int stringID)
     {
         NSDictionary* frame = cursorFrames[cursorFrame];
         CGImageRef cgimage = (CGImageRef)frame[@"image"];
-        CGSize size = CGSizeMake(CGImageGetWidth(cgimage), CGImageGetHeight(cgimage));
+        CGSize size = CGSizeMake(CGImageGetWidth(cgimage) * cursorScale,
+                                 CGImageGetHeight(cgimage) * cursorScale);
         NSImage* image = [[NSImage alloc] initWithCGImage:cgimage size:NSSizeFromCGSize(cgsize_mac_from_win(size))];
         CFDictionaryRef hotSpotDict = (CFDictionaryRef)frame[@"hotSpot"];
         CGPoint hotSpot;
 
         if (!CGPointMakeWithDictionaryRepresentation(hotSpotDict, &hotSpot))
             hotSpot = CGPointZero;
+        hotSpot.x *= cursorScale;
+        hotSpot.y *= cursorScale;
         hotSpot = cgpoint_mac_from_win(hotSpot);
         self.cursor = [[[NSCursor alloc] initWithImage:image hotSpot:NSPointFromCGPoint(hotSpot)] autorelease];
         [image release];
+        builtCursorFrames = [cursorFrames retain];
+        builtCursorFrame = cursorFrame;
+        builtCursorScale = cursorScale;
         [self unhideCursor];
     }
 
@@ -1139,13 +1175,15 @@ static NSString* WineLocalizedString(unsigned int stringID)
         [cursorTimer setFireDate:date];
     }
 
-    - (void) setCursorWithFrames:(NSArray*)frames
+    - (void) setCursorWithFrames:(NSArray*)frames scale:(CGFloat)scale
     {
-        if (self.cursorFrames == frames || [self.cursorFrames isEqualToArray:frames])
+        if ((self.cursorFrames == frames || [self.cursorFrames isEqualToArray:frames]) &&
+            (!frames || cursorScale == scale))
             return;
 
         self.cursorFrames = frames;
         cursorFrame = 0;
+        cursorScale = scale;
         [cursorTimer invalidate];
         self.cursorTimer = nil;
 
@@ -1165,7 +1203,19 @@ static NSString* WineLocalizedString(unsigned int stringID)
                 [[NSRunLoop currentRunLoop] addTimer:cursorTimer forMode:NSRunLoopCommonModes];
             }
 
-            [self setCursor];
+            /* A hidden -> shown round trip arrives as frames -> nil -> the
+               same frames (the per-HCURSOR frame arrays are cached).  The
+               cursor built from those frames is still set: rebuilding it and
+               [cursor set]ing pushes a fresh cursor image to the window
+               server on every show, which can slip the next presents by a
+               whole refresh (measured as a 120 Hz game dropping to ~107 fps
+               under rapid clicking, one to two late presents per show).
+               Reuse it and just unhide. */
+            if (builtCursorFrame == 0 && builtCursorScale == scale &&
+                [builtCursorFrames isEqualToArray:frames])
+                [self unhideCursor];
+            else
+                [self setCursor];
         }
     }
 
@@ -2801,10 +2851,13 @@ int macdrv_set_display_mode(CGDirectDisplayID displayID, CGDisplayModeRef displa
  * This is the hot spot, measured in pixels down and to the right of the
  * top-left corner of the image.
  *
+ * scale multiplies the size of every frame image and its hot spot.  It
+ * lets a cursor shown over a DPI-scaled window grow with the window.
+ *
  * If the array has exactly 1 element, the cursor is static, not
  * animated.  If frames is NULL or has 0 elements, the cursor is hidden.
  */
-void macdrv_set_cursor(CFStringRef name, CFArrayRef frames)
+void macdrv_set_cursor(CFStringRef name, CFArrayRef frames, CGFloat scale)
 {
     SEL sel;
 
@@ -2813,7 +2866,7 @@ void macdrv_set_cursor(CFStringRef name, CFArrayRef frames)
     {
         OnMainThreadAsync(^{
             WineApplicationController* controller = [WineApplicationController sharedController];
-            [controller setCursorWithFrames:nil];
+            [controller setCursorWithFrames:nil scale:1];
             controller.cursor = [NSCursor performSelector:sel];
             [controller unhideCursor];
         });
@@ -2824,14 +2877,14 @@ void macdrv_set_cursor(CFStringRef name, CFArrayRef frames)
         if ([nsframes count])
         {
             OnMainThreadAsync(^{
-                [[WineApplicationController sharedController] setCursorWithFrames:nsframes];
+                [[WineApplicationController sharedController] setCursorWithFrames:nsframes scale:scale];
             });
         }
         else
         {
             OnMainThreadAsync(^{
                 WineApplicationController* controller = [WineApplicationController sharedController];
-                [controller setCursorWithFrames:nil];
+                [controller setCursorWithFrames:nil scale:1];
                 [controller hideCursor];
             });
         }
