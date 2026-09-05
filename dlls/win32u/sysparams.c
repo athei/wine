@@ -1696,7 +1696,10 @@ static void add_gpu( const char *name, const struct pci_id *pci_id, const GUID *
            pci_id->subsystem, pci_id->revision, debugstr_guid( vulkan_uuid ) );
 
     if (!enum_key && !(enum_key = reg_create_ascii_key( NULL, enum_keyA, 0, NULL )))
+    {
+        ERR( "Failed to create enum key\n" );
         return;
+    }
 
     if (!ctx->mutex)
     {
@@ -1704,7 +1707,11 @@ static void add_gpu( const char *name, const struct pci_id *pci_id, const GUID *
         prepare_devices();
     }
 
-    if (!(gpu = calloc( 1, sizeof(*gpu) ))) return;
+    if (!(gpu = calloc( 1, sizeof(*gpu) )))
+    {
+        ERR( "Failed to allocate gpu\n" );
+        return;
+    }
     gpu->refcount = 1;
     gpu->index = ctx->gpu_count;
 
@@ -1734,7 +1741,11 @@ static void add_gpu( const char *name, const struct pci_id *pci_id, const GUID *
 
     snprintf( gpu->path, sizeof(gpu->path), "PCI\\VEN_%04X&DEV_%04X&SUBSYS_%08X&REV_%02X\\%08X",
               pci_id->vendor, pci_id->device, pci_id->subsystem, pci_id->revision, gpu->index );
-    if (!(hkey = reg_create_ascii_key( enum_key, gpu->path, 0, NULL ))) return;
+    if (!(hkey = reg_create_ascii_key( enum_key, gpu->path, 0, NULL )))
+    {
+        ERR( "Failed to create gpu key %s\n", debugstr_a(gpu->path) );
+        return;
+    }
 
     if ((subkey = reg_create_ascii_key( hkey, "Device Parameters", 0, NULL )))
     {
@@ -1775,7 +1786,7 @@ static void add_gpu( const char *name, const struct pci_id *pci_id, const GUID *
 
     if (!write_gpu_to_registry( gpu, pci_id, vulkan_gpu ? vulkan_gpu->memory : 0 ))
     {
-        WARN( "Failed to write gpu %p to registry\n", gpu );
+        ERR( "Failed to write gpu %p to registry\n", gpu );
         gpu_release( gpu );
     }
     else
@@ -1843,7 +1854,11 @@ static void add_source( const char *name, UINT state_flags, UINT dpi, void *para
 
     TRACE( "name %s, state_flags %#x\n", name, state_flags );
 
-    assert( !list_empty( &gpus ) );
+    if (list_empty( &gpus ))
+    {
+        ERR( "no gpu for source %s, skipping\n", debugstr_a(name) );
+        return;
+    }
     gpu = LIST_ENTRY( list_tail( &gpus ), struct gpu, entry );
 
     /* in virtual desktop mode, report all physical sources as detached */
@@ -1968,7 +1983,11 @@ static void add_monitor( const struct gdi_monitor *gdi_monitor, void *param )
     char buffer[MAX_PATH];
     char monitor_id_string[16];
 
-    assert( !list_empty( &sources ) );
+    if (list_empty( &sources ))
+    {
+        ERR( "no source for monitor, skipping\n" );
+        return;
+    }
     source = LIST_ENTRY( list_tail( &sources ), struct source, entry );
 
     if (!(monitor = calloc( 1, sizeof(*monitor) ))) return;
@@ -2161,7 +2180,11 @@ static void add_modes( const DEVMODEW *current, UINT host_modes_count, const DEV
     TRACE( "current %s, host_modes_count %u, host_modes %p, param %p\n", debugstr_devmodew( current ),
            host_modes_count, host_modes, param );
 
-    assert( !list_empty( &sources ) );
+    if (list_empty( &sources ))
+    {
+        ERR( "no source for modes, skipping\n" );
+        return;
+    }
     source = LIST_ENTRY( list_tail( &sources ), struct source, entry );
 
     if (emulate_modeset)
@@ -2639,7 +2662,7 @@ static NTSTATUS default_update_display_devices( struct device_manager_ctx *ctx )
     add_gpu( NULL, &pci_id, NULL, ctx );
     add_source( "Default", source_flags, system_dpi, ctx );
 
-    assert( !list_empty( &sources ) );
+    if (list_empty( &sources )) return STATUS_UNSUCCESSFUL;
     source = LIST_ENTRY( list_tail( &sources ), struct source, entry );
 
     if (!read_source_mode( source->key, ENUM_CURRENT_SETTINGS, &mode ))
@@ -2698,7 +2721,11 @@ static BOOL add_virtual_source( struct device_manager_ctx *ctx )
     UINT modes_count;
     struct gpu *gpu;
 
-    assert( !list_empty( &gpus ) );
+    if (list_empty( &gpus ))
+    {
+        ERR( "no gpu for virtual source, skipping\n" );
+        return STATUS_UNSUCCESSFUL;
+    }
     gpu = LIST_ENTRY( list_tail( &gpus ), struct gpu, entry );
 
     if (list_empty( &sources )) physical = NULL;
