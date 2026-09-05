@@ -524,6 +524,17 @@ char *get_alternate_wineloader( WORD machine )
     else if (alt_build_dir)
         asprintf( &ret, "%s/loader/wine", alt_build_dir );
 
+    /* Installations without a 32-bit Unix loader (wow64-only builds) have no
+     * i386-unix directory, so the constructed path may not exist. Callers
+     * treat a non-NULL return as proof that another loader must run the
+     * image: loader_exec execs it and env.c falls back to start.exe, which
+     * relaunches the main exe in a detached process. Verify the loader is
+     * actually there so those callers behave as if WINEARCH=wow64 was set. */
+    if (ret && access( ret, X_OK ))
+    {
+        free( ret );
+        ret = NULL;
+    }
     return ret;
 }
 
@@ -1320,12 +1331,23 @@ static BOOL sonoma_or_later(void)
 
 static void init_non_native_support(void)
 {
-    char *libd3dshared_path = getenv( "CX_APPLEGPTK_LIBD3DSHARED_PATH" );
+    char *libd3dshared_path = getenv( "CX_APPLEGPTK_LIBD3DSHARED_PATH" ), *default_path = NULL;
 
     register_non_native_code_region = NULL;
     supports_non_native_code_regions = NULL;
 
-    if (!libd3dshared_path || !sonoma_or_later())
+    if (!sonoma_or_later())
+        return;
+
+    /* Fall back to the copy shipped beside the D3DMetal framework in our own
+     * tree, so that a self-contained bundle needs no environment setup. The
+     * dylib is loaded either way as the unix half of the D3DMetal builtins,
+     * but only loading it here records the __TEXT range that the unix call
+     * dispatcher needs to spot calls arriving from Apple code. */
+    if (!libd3dshared_path && ntdll_dir)
+        libd3dshared_path = default_path = build_path( ntdll_dir, "../../external/libd3dshared.dylib" );
+
+    if (!libd3dshared_path)
         return;
 
     non_native_support_lib = dlopen( libd3dshared_path, RTLD_LOCAL );
@@ -1350,6 +1372,8 @@ static void init_non_native_support(void)
     }
     else
         TRACE( "Loading libd3dshared.dylib failed: %s\n", dlerror() );
+
+    free( default_path );
 }
 
 static NTSTATUS pe_module_loaded( void *args )
@@ -2245,15 +2269,15 @@ static void start_main_thread(void)
 
     /* CW Hack 24067 */
     {
-        void *cxcompatdb = NULL;
+        void *compatdb = NULL;
         char *name = NULL;
 
-        asprintf( &name, "%s/cxcompatdb.so", ntdll_dir );
+        asprintf( &name, "%s/compatdb.so", ntdll_dir );
         if (name)
         {
-            cxcompatdb = dlopen( name, RTLD_LOCAL | RTLD_LAZY );
-            if (!cxcompatdb)
-                WARN( "error loading cxcompatdb.so: %s\n", dlerror() );
+            compatdb = dlopen( name, RTLD_LOCAL | RTLD_LAZY );
+            if (!compatdb)
+                WARN( "error loading compatdb.so: %s\n", dlerror() );
             free(name);
         }
     }
