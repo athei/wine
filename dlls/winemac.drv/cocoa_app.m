@@ -221,6 +221,7 @@ static NSString* WineLocalizedString(unsigned int stringID)
         [clipCursorHandler release];
         [cursorTimer release];
         [cursorFrames release];
+        [builtCursorFrames release];
         [latentDisplayModes release];
         [originalDisplayModes release];
         [keyWindows release];
@@ -1039,38 +1040,65 @@ static NSString* WineLocalizedString(unsigned int stringID)
         return ([originalDisplayModes count] > 0 || displaysCapturedForFullscreen);
     }
 
+    /* A fully transparent cursor, set instead of [NSCursor hide].
+       Toggling the cursor plane off and on makes the window server present
+       the next frames of a full-screen Metal layer one refresh late, which
+       a game hiding the cursor while a mouse button is held turns into a
+       sustained frame-rate drop under rapid clicking (measured 120 -> ~107
+       fps; with the toggle gone the rate holds).  Swapping the cursor
+       image has no such cost, so hidden = blank image, plane always on. */
+    static NSCursor* blank_cursor(void)
+    {
+        static NSCursor* blank;
+        if (!blank)
+        {
+            NSBitmapImageRep* rep = [[NSBitmapImageRep alloc]
+                initWithBitmapDataPlanes:NULL
+                              pixelsWide:1
+                              pixelsHigh:1
+                           bitsPerSample:8
+                         samplesPerPixel:4
+                                hasAlpha:YES
+                                isPlanar:NO
+                          colorSpaceName:NSDeviceRGBColorSpace
+                             bytesPerRow:4
+                            bitsPerPixel:32];
+            NSImage* image = [[NSImage alloc] initWithSize:NSMakeSize(1, 1)];
+            memset([rep bitmapData], 0, 4);
+            [image addRepresentation:rep];
+            [rep release];
+            blank = [[NSCursor alloc] initWithImage:image hotSpot:NSZeroPoint];
+            [image release];
+        }
+        return blank;
+    }
+
     - (void) updateCursor:(BOOL)force
     {
         if (force || lastTargetWindow)
         {
-            if (clientWantsCursorHidden && !cursorHidden)
+            if (clientWantsCursorHidden)
             {
-                [NSCursor hide];
-                cursorHidden = TRUE;
+                if (!cursorHidden)
+                {
+                    [blank_cursor() set];
+                    cursorIsCurrent = FALSE;
+                    cursorHidden = TRUE;
+                }
             }
-
-            if (!cursorIsCurrent)
+            else if (!cursorIsCurrent || cursorHidden)
             {
                 [cursor set];
                 cursorIsCurrent = TRUE;
-            }
-
-            if (!clientWantsCursorHidden && cursorHidden)
-            {
-                [NSCursor unhide];
                 cursorHidden = FALSE;
             }
         }
         else
         {
-            if (cursorIsCurrent)
+            if (cursorIsCurrent || cursorHidden)
             {
                 [[NSCursor arrowCursor] set];
                 cursorIsCurrent = FALSE;
-            }
-            if (cursorHidden)
-            {
-                [NSCursor unhide];
                 cursorHidden = FALSE;
             }
         }
@@ -1098,6 +1126,8 @@ static NSString* WineLocalizedString(unsigned int stringID)
     {
         if (newCursor != cursor)
         {
+            [builtCursorFrames release];
+            builtCursorFrames = nil;
             [cursor release];
             cursor = [newCursor retain];
             cursorIsCurrent = FALSE;
@@ -1119,6 +1149,8 @@ static NSString* WineLocalizedString(unsigned int stringID)
         hotSpot = cgpoint_mac_from_win(hotSpot);
         self.cursor = [[[NSCursor alloc] initWithImage:image hotSpot:NSPointFromCGPoint(hotSpot)] autorelease];
         [image release];
+        builtCursorFrames = [cursorFrames retain];
+        builtCursorFrame = cursorFrame;
         [self unhideCursor];
     }
 
@@ -1165,7 +1197,18 @@ static NSString* WineLocalizedString(unsigned int stringID)
                 [[NSRunLoop currentRunLoop] addTimer:cursorTimer forMode:NSRunLoopCommonModes];
             }
 
-            [self setCursor];
+            /* A hidden -> shown round trip arrives as frames -> nil -> the
+               same frames (the per-HCURSOR frame arrays are cached).  The
+               cursor built from those frames is still set: rebuilding it and
+               [cursor set]ing pushes a fresh cursor image to the window
+               server on every show, which can slip the next presents by a
+               whole refresh (measured as a 120 Hz game dropping to ~107 fps
+               under rapid clicking, one to two late presents per show).
+               Reuse it and just unhide. */
+            if (builtCursorFrame == 0 && [builtCursorFrames isEqualToArray:frames])
+                [self unhideCursor];
+            else
+                [self setCursor];
         }
     }
 
@@ -2467,8 +2510,53 @@ static NSString* WineLocalizedString(unsigned int stringID)
         forceNextMouseMoveAbsolute = TRUE;
     }
 
+    /* The parts of the screen configuration that Wine's view of the displays
+       depends on: which screens exist, where they are, their work areas,
+       their backing scale and their CG display mode. */
+    - (NSArray*) currentScreenConfiguration
+    {
+        NSMutableArray* config = [NSMutableArray array];
+        NSScreen* screen;
+
+        for (screen in [NSScreen screens])
+        {
+            NSNumber* displayID = [screen.deviceDescription objectForKey:@"NSScreenNumber"];
+            CGDisplayModeRef mode = CGDisplayCopyDisplayMode([displayID unsignedIntValue]);
+            NSMutableDictionary* entry = [NSMutableDictionary dictionaryWithObjectsAndKeys:
+                displayID ? displayID : (id)[NSNull null], @"id",
+                NSStringFromRect([screen frame]), @"frame",
+                NSStringFromRect([screen visibleFrame]), @"visibleFrame",
+                [NSNumber numberWithDouble:[screen backingScaleFactor]], @"scale",
+                nil];
+            if (mode)
+            {
+                [entry setObject:(id)mode forKey:@"mode"];
+                CGDisplayModeRelease(mode);
+            }
+            [config addObject:entry];
+        }
+
+        return config;
+    }
+
     - (void)applicationDidChangeScreenParameters:(NSNotification *)notification
     {
+        NSArray* config = [self currentScreenConfiguration];
+
+        /* macOS posts this notification for much more than display topology
+           or mode changes: on an EDR display every step of the headroom
+           ramp (which follows ambient light, thermal state and on-screen
+           content) arrives as one, at up to the refresh rate.  Each one
+           used to cost a full display re-enumeration in the desktop
+           process, a display-cache invalidation in every process and a
+           window-level pass here, with the main thread busy while other
+           threads wait on it for SetCapture or SetCursorPos.  Only react
+           when something Wine actually depends on changed. */
+        if (lastScreenConfiguration && [lastScreenConfiguration isEqualToArray:config])
+            return;
+        [lastScreenConfiguration release];
+        lastScreenConfiguration = [config retain];
+
         primaryScreenHeightValid = FALSE;
         [self sendDisplaysChanged:FALSE];
         [self adjustWindowLevels];

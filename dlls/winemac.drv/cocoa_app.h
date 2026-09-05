@@ -59,6 +59,7 @@ enum {
 
     CGFloat primaryScreenHeight;
     BOOL primaryScreenHeightValid;
+    NSArray* lastScreenConfiguration;
     NSMutableData* screenFrameCGRects;
 
     WineWindow* lastTargetWindow;
@@ -80,6 +81,8 @@ enum {
     int         cursorFrame;
     NSTimer*    cursorTimer;
     NSCursor*   cursor;
+    NSArray*    builtCursorFrames;
+    int         builtCursorFrame;
     BOOL        cursorIsCurrent;
     BOOL        cursorHidden;
     BOOL        clientWantsCursorHidden;
