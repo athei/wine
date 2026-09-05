@@ -2996,6 +2996,7 @@ static const struct vulkan_driver_funcs lazydrv_funcs =
 
 static void vulkan_init_once(void)
 {
+#ifdef SONAME_LIBVULKAN
     struct vulkan_instance_extensions extensions = {0};
     VkExtensionProperties *properties = NULL;
     uint32_t count = 0;
@@ -3074,6 +3075,7 @@ static void vulkan_init_once(void)
 failed:
     if (res) ERR( "Failed to initialize instance extensions, res %d\n", res );
     free( properties );
+#endif /* SONAME_LIBVULKAN */
 }
 
 /***********************************************************************

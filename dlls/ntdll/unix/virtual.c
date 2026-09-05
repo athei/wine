@@ -5129,6 +5129,26 @@ void virtual_set_large_address_space(void)
 
 
 /***********************************************************************
+ *           virtual_recheck_large_address_space
+ *
+ * Give a 32-bit process the 4GB address space if compatdb.so asked for it,
+ * directly or by setting WINE_LARGE_ADDRESS_AWARE, after
+ * virtual_set_large_address_space made the first decision. The limit only
+ * grows: the 32-bit stack and the apiset map are already placed below 2GB,
+ * which stays valid either way.
+ */
+void virtual_recheck_large_address_space(void)
+{
+#ifdef _WIN64
+    if (!is_wow64() || user_space_wow_limit == limit_4g - 1) return;
+    if (get_compat_large_address_aware() != 1 && !force_laa()) return;
+    TRACE( "enabling the large address space\n" );
+    user_space_wow_limit = limit_4g - 1;
+#endif
+}
+
+
+/***********************************************************************
  *             allocate_virtual_memory
  *
  * NtAllocateVirtualMemory[Ex] implementation.

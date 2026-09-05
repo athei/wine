@@ -1843,7 +1843,11 @@ static void add_source( const char *name, UINT state_flags, UINT dpi, void *para
 
     TRACE( "name %s, state_flags %#x\n", name, state_flags );
 
-    assert( !list_empty( &gpus ) );
+    if (list_empty( &gpus ))
+    {
+        ERR( "no gpu for source %s, skipping\n", debugstr_a(name) );
+        return;
+    }
     gpu = LIST_ENTRY( list_tail( &gpus ), struct gpu, entry );
 
     /* in virtual desktop mode, report all physical sources as detached */
@@ -1968,7 +1972,11 @@ static void add_monitor( const struct gdi_monitor *gdi_monitor, void *param )
     char buffer[MAX_PATH];
     char monitor_id_string[16];
 
-    assert( !list_empty( &sources ) );
+    if (list_empty( &sources ))
+    {
+        ERR( "no source for monitor, skipping\n" );
+        return;
+    }
     source = LIST_ENTRY( list_tail( &sources ), struct source, entry );
 
     if (!(monitor = calloc( 1, sizeof(*monitor) ))) return;
@@ -2161,7 +2169,11 @@ static void add_modes( const DEVMODEW *current, UINT host_modes_count, const DEV
     TRACE( "current %s, host_modes_count %u, host_modes %p, param %p\n", debugstr_devmodew( current ),
            host_modes_count, host_modes, param );
 
-    assert( !list_empty( &sources ) );
+    if (list_empty( &sources ))
+    {
+        ERR( "no source for modes, skipping\n" );
+        return;
+    }
     source = LIST_ENTRY( list_tail( &sources ), struct source, entry );
 
     if (emulate_modeset)
@@ -2639,7 +2651,7 @@ static NTSTATUS default_update_display_devices( struct device_manager_ctx *ctx )
     add_gpu( NULL, &pci_id, NULL, ctx );
     add_source( "Default", source_flags, system_dpi, ctx );
 
-    assert( !list_empty( &sources ) );
+    if (list_empty( &sources )) return STATUS_UNSUCCESSFUL;
     source = LIST_ENTRY( list_tail( &sources ), struct source, entry );
 
     if (!read_source_mode( source->key, ENUM_CURRENT_SETTINGS, &mode ))
@@ -2698,7 +2710,11 @@ static BOOL add_virtual_source( struct device_manager_ctx *ctx )
     UINT modes_count;
     struct gpu *gpu;
 
-    assert( !list_empty( &gpus ) );
+    if (list_empty( &gpus ))
+    {
+        ERR( "no gpu for virtual source, skipping\n" );
+        return STATUS_UNSUCCESSFUL;
+    }
     gpu = LIST_ENTRY( list_tail( &gpus ), struct gpu, entry );
 
     if (list_empty( &sources )) physical = NULL;
@@ -5944,6 +5960,15 @@ void sysparams_init(void)
         emulate_modeset = IS_OPTION_TRUE( buffer[0] );
 
 #undef IS_OPTION_TRUE
+
+    /* CW Hack 24067: a compatdb.so rule is applied first, so it wins over
+     * the AppCompatFlags layer below and over the manifest */
+    switch (ntdll_get_compat_dpi_awareness())
+    {
+    case 1: NtUserSetProcessDpiAwarenessContext( NTUSER_DPI_SYSTEM_AWARE, 0 ); break;
+    case 0: NtUserSetProcessDpiAwarenessContext( NTUSER_DPI_UNAWARE, 0 ); break;
+    default: break;
+    }
 
     if (app_compat_flags)
     {

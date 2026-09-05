@@ -214,6 +214,7 @@ extern void *create_startup_info( const UNICODE_STRING *nt_image, ULONG process_
                                   const RTL_USER_PROCESS_PARAMETERS *params,
                                   const struct pe_image_info *pe_info, DWORD *info_size );
 extern char *get_alternate_wineloader( WORD machine );
+extern int get_compat_large_address_aware(void);
 extern NTSTATUS exec_wineloader( char **argv, int socketfd, const struct pe_image_info *pe_info, const char *image_path );
 extern NTSTATUS load_builtin( const struct pe_image_info *image_info, UNICODE_STRING *nt_name,
                               ANSI_STRING *exp_name, USHORT machine, SECTION_IMAGE_INFORMATION *info,
@@ -312,6 +313,7 @@ extern NTSTATUS virtual_uninterrupted_write_memory( void *addr, const void *buff
 extern void virtual_set_force_exec( BOOL enable );
 extern void virtual_enable_write_exceptions( BOOL enable );
 extern void virtual_set_large_address_space(void);
+extern void virtual_recheck_large_address_space(void);
 extern void virtual_fill_image_information( const struct pe_image_info *pe_info,
                                             SECTION_IMAGE_INFORMATION *info );
 extern void *get_builtin_so_handle( void *module );
