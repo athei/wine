@@ -93,6 +93,9 @@
 @property (readonly, nonatomic) BOOL floating;
 @property (readonly, getter=isFullscreen, nonatomic) BOOL fullscreen;
 @property (readonly, getter=isFakingClose, nonatomic) BOOL fakingClose;
+/* Set on the main thread when the window is being destroyed. From then on
+   the references that events and queries hold may be the last ones. */
+@property (readonly, nonatomic) BOOL closing;
 @property (readonly, nonatomic) NSRect wine_fractionalFrame;
 
 /* Whether this window, when ordered in and not miniaturized, would appear to

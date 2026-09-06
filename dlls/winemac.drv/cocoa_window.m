@@ -3495,7 +3495,14 @@ void macdrv_destroy_cocoa_window(macdrv_window w)
         [window close];
     });
     [window.queue discardEventsMatchingMask:-1 forWindow:window];
-    [window release];
+
+    /* The window's views may only be destroyed on the main thread, and
+       the window's dealloc destroys its frame view, so the release that
+       can be the last one is handed to the main thread. The request that
+       closed the window is already done, so this is ordered after it. */
+    OnMainThreadAsync(^{
+        [window release];
+    });
 }
 }
 
