@@ -86,6 +86,36 @@ WINE_DEFAULT_DEBUG_CHANNEL(process);
 
 static ULONG execute_flags = MEM_EXECUTE_OPTION_DISABLE;
 
+/* Under Rosetta every page that is writable and executable costs a Mach round
+ * trip on first touch, and turning no-execute off makes every readable mapping
+ * executable, so a process that does it crawls. Keep no-execute permanently on
+ * there, as the Windows AlwaysOn policy does. WINE_DISABLE_NX_COMPAT=0 lets a
+ * process turn it off again on any host; any other value keeps it on on every
+ * host. */
+static ULONG get_execute_flags(void)
+{
+    static int always_on = -1;
+
+    if (always_on == -1)
+    {
+        const char *env = getenv( "WINE_DISABLE_NX_COMPAT" );
+
+        if (env) always_on = strcmp( env, "0" ) != 0;
+        else
+        {
+            int translated = 0;
+#ifdef __APPLE__
+            size_t size = sizeof(translated);
+            if (sysctlbyname( "sysctl.proc_translated", &translated, &size, NULL, 0 ) == -1)
+                translated = 0;
+#endif
+            always_on = translated;
+        }
+        if (always_on) TRACE( "no-execute is permanently on\n" );
+    }
+    return always_on ? execute_flags | MEM_EXECUTE_OPTION_PERMANENT : execute_flags;
+}
+
 static UINT process_error_mode;
 
 /* CrossOver Hack 10523: shunt the loading to CrossOver */
@@ -1970,7 +2000,7 @@ NTSTATUS WINAPI NtQueryInformationProcess( HANDLE handle, PROCESSINFOCLASS class
                              MEM_EXECUTE_OPTION_DISABLE_THUNK_EMULATION |
                              MEM_EXECUTE_OPTION_PERMANENT;
         else
-            *(ULONG *)info = execute_flags;
+            *(ULONG *)info = get_execute_flags();
         break;
 
     case ProcessPriorityClass:
@@ -2257,7 +2287,7 @@ NTSTATUS WINAPI NtSetInformationProcess( HANDLE handle, PROCESSINFOCLASS class, 
 
     case ProcessExecuteFlags:
         if ((is_win64 && !is_wow64()) || size != sizeof(ULONG)) return STATUS_INVALID_PARAMETER;
-        if (execute_flags & MEM_EXECUTE_OPTION_PERMANENT) return STATUS_ACCESS_DENIED;
+        if (get_execute_flags() & MEM_EXECUTE_OPTION_PERMANENT) return STATUS_ACCESS_DENIED;
         else
         {
             BOOL enable;
