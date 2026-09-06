@@ -1613,11 +1613,26 @@ static WINE_MODREF *alloc_module( HMODULE hModule, const UNICODE_STRING *nt_name
         ERR( "rtl_rb_tree_put failed.\n" );
     /* wait until init is called for inserting into InInitializationOrderModuleList */
 
-    if (!(nt->OptionalHeader.DllCharacteristics & IMAGE_DLLCHARACTERISTICS_NX_COMPAT))
+    /* Data execution prevention follows the main executable, as on Windows: a
+     * DLL without IMAGE_DLLCHARACTERISTICS_NX_COMPAT does not turn it off for
+     * the process. Turning it off forces PROT_EXEC on every readable mapping,
+     * and under Rosetta each fresh writable and executable page then costs a
+     * Mach round trip on first touch. WINE_DISABLE_NX_COMPAT keeps it on even
+     * for an executable that lacks the flag. */
+    if (hModule == NtCurrentTeb()->Peb->ImageBaseAddress &&
+        !(nt->OptionalHeader.DllCharacteristics & IMAGE_DLLCHARACTERISTICS_NX_COMPAT))
     {
-        ULONG flags = MEM_EXECUTE_OPTION_ENABLE;
-        WARN( "disabling no-exec because of %s\n", debugstr_w(wm->ldr.BaseDllName.Buffer) );
-        NtSetInformationProcess( GetCurrentProcess(), ProcessExecuteFlags, &flags, sizeof(flags) );
+        UNICODE_STRING val_str, name_str = RTL_CONSTANT_STRING( L"WINE_DISABLE_NX_COMPAT" );
+        val_str.MaximumLength = 0;
+        if (RtlQueryEnvironmentVariable_U( NULL, &name_str, &val_str ) == STATUS_VARIABLE_NOT_FOUND)
+        {
+            ULONG flags = MEM_EXECUTE_OPTION_ENABLE;
+            WARN( "disabling no-exec because %s is not NX compatible\n",
+                  debugstr_w(wm->ldr.BaseDllName.Buffer) );
+            NtSetInformationProcess( GetCurrentProcess(), ProcessExecuteFlags, &flags, sizeof(flags) );
+        }
+        else WARN( "keeping no-exec for %s (WINE_DISABLE_NX_COMPAT)\n",
+                   debugstr_w(wm->ldr.BaseDllName.Buffer) );
     }
     return wm;
 }
