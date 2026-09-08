@@ -652,6 +652,44 @@ macdrv_event* macdrv_retain_event(macdrv_event *event)
 }
 
 /***********************************************************************
+ *              release_window
+ *
+ * Drop the reference an event or a query holds on its window.  A window
+ * and its views may only be destroyed on the main thread, so a release
+ * that can be the last one is handed to the main thread.  While the
+ * window is not closing, the reference taken when it was created still
+ * exists and the release here cannot be the last; once it is closing,
+ * that reference is gone or about to go, and a Wine thread's release of
+ * an event posted after the close, or of a query in flight during the
+ * close, could otherwise dealloc the window on that thread.
+ */
+static void release_window(WineWindow* window)
+{
+    if (window && window.closing && ![NSThread isMainThread])
+        OnMainThreadAsync(^{
+            [window release];
+        });
+    else
+        [window release];
+}
+
+/***********************************************************************
+ *              release_window_set
+ *
+ * Drop a set of windows.  The set may hold windows of other threads
+ * in any state, so off the main thread it is released there.
+ */
+static void release_window_set(NSMutableSet* windows)
+{
+    if (windows && ![NSThread isMainThread])
+        OnMainThreadAsync(^{
+            [windows release];
+        });
+    else
+        [windows release];
+}
+
+/***********************************************************************
  *              macdrv_release_event
  *
  * Decrements the reference count of an event.  If the count falls to
@@ -679,11 +717,11 @@ void macdrv_release_event(macdrv_event *event)
                 macdrv_release_query(event->query_event.query);
                 break;
             case WINDOW_GOT_FOCUS:
-                [(NSMutableSet*)event->window_got_focus.tried_windows release];
+                release_window_set((NSMutableSet*)event->window_got_focus.tried_windows);
                 break;
         }
 
-        [(WineWindow*)event->window release];
+        release_window((WineWindow*)event->window);
         free(event);
     }
 }
@@ -731,7 +769,7 @@ void macdrv_release_query(macdrv_query *query)
                     CFRelease(query->pasteboard_data.type);
                 break;
         }
-        [(WineWindow*)query->window release];
+        release_window((WineWindow*)query->window);
         free(query);
     }
 }

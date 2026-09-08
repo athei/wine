@@ -5313,7 +5313,8 @@ static void free_window_handle( HWND hwnd )
         {
             req->handle = wine_server_user_handle( hwnd );
             wine_server_call( req );
-            set_user_handle_ptr( hwnd, NULL );
+            /* The server may have reused the handle for another object. */
+            InterlockedCompareExchangePointer( &client_objects[USER_HANDLE_TO_INDEX(hwnd)], NULL, win );
         }
         SERVER_END_REQ;
         user_unlock();
