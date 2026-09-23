@@ -1258,22 +1258,15 @@ static CVReturn WineDisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTi
         else
             level = NSNormalWindowLevel;
 
-        if (active)
+        /* A window covering a screen keeps its level: raised above the menu
+           bar, it breaks Mission Control on macOS 27.  The controller hides
+           the Dock and menu bar instead, as native games do. */
+        if (active && (fullscreen || [self screen]) &&
+            [[WineApplicationController sharedController] areDisplaysCaptured])
         {
-            BOOL captured;
-
-            captured = (fullscreen || [self screen]) && [[WineApplicationController sharedController] areDisplaysCaptured];
-
-            if (captured || fullscreen)
-            {
-                if (captured)
-                    level = CGShieldingWindowLevel() + 1; /* Need +1 or we don't get mouse moves */
-                else
-                    level = NSStatusWindowLevel + 1;
-
-                if (self.floating)
-                    level++;
-            }
+            level = CGShieldingWindowLevel() + 1; /* Need +1 or we don't get mouse moves */
+            if (self.floating)
+                level++;
         }
 
         return level;
@@ -1360,14 +1353,12 @@ static CVReturn WineDisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTi
                          */
                         if (stage_manager_enabled())
                         {
-                            [self setStyleMask:([self styleMask] | NSWindowStyleMaskMiniaturizable)];
-                            [super miniaturize:nil];
+                            [self miniaturizeForWin32];
                         }
                     }
                     else
                     {
-                        [self setStyleMask:([self styleMask] | NSWindowStyleMaskMiniaturizable)];
-                        [super miniaturize:nil];
+                        [self miniaturizeForWin32];
                         discard |= event_mask_for_type(WINDOW_BROUGHT_FORWARD) |
                                    event_mask_for_type(WINDOW_GOT_FOCUS) |
                                    event_mask_for_type(WINDOW_LOST_FOCUS);
@@ -1841,8 +1832,7 @@ static CVReturn WineDisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTi
 
             if (pendingMinimize)
             {
-                [self setStyleMask:([self styleMask] | NSWindowStyleMaskMiniaturizable)];
-                [super miniaturize:nil];
+                [self miniaturizeForWin32];
                 pendingMinimize = FALSE;
             }
 
@@ -1915,6 +1905,14 @@ static CVReturn WineDisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTi
                                          event_mask_for_type(WINDOW_MINIMIZE_REQUESTED) |
                                          event_mask_for_type(WINDOW_RESTORE_REQUESTED)
                                forWindow:self];
+    }
+
+    - (BOOL) coversMenuBarScreen
+    {
+        NSScreen* screen = [[NSScreen screens] firstObject];
+        NSRect contentRect = [self contentRectForFrameRect:self.wine_fractionalFrame];
+
+        return screen && fullscreen && screen_covered_by_rect(contentRect, @[screen]);
     }
 
     - (void) updateFullscreen
@@ -2708,6 +2706,14 @@ static CVReturn WineDisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTi
     - (void) undo:(id)sender
     {
         [self sendEditMenuCommand:EDIT_COMMAND_UNDO];
+    }
+
+    /* Carry out a minimize that Windows asked for. */
+    - (void) miniaturizeForWin32
+    {
+        [[WineApplicationController sharedController] prepareToMiniaturize];
+        [self setStyleMask:([self styleMask] | NSWindowStyleMaskMiniaturizable)];
+        [super miniaturize:nil];
     }
 
     - (void) miniaturize:(id)sender

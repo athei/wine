@@ -140,6 +140,7 @@ enum {
 
     - (WineWindow*) frontWineWindow;
     - (void) adjustWindowLevels;
+    - (void) prepareToMiniaturize;
     - (void) updateFullscreenWindows;
 
     - (BOOL) handleEvent:(NSEvent*)anEvent;
