@@ -1079,14 +1079,14 @@ static NSString* WineLocalizedString(unsigned int stringID)
         {
             if (clientWantsCursorHidden)
             {
-                if (!cursorHidden)
+                if (!cursorHidden || [NSCursor currentCursor] != blank_cursor())
                 {
                     [blank_cursor() set];
                     cursorIsCurrent = FALSE;
                     cursorHidden = TRUE;
                 }
             }
-            else if (!cursorIsCurrent || cursorHidden)
+            else if (!cursorIsCurrent || cursorHidden || [NSCursor currentCursor] != cursor)
             {
                 [cursor set];
                 cursorIsCurrent = TRUE;

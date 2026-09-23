@@ -469,6 +469,13 @@ static CVReturn WineDisplayLinkCallback(CVDisplayLinkRef displayLink, const CVTi
         return NO;
     }
 
+    - (void) mouseDown:(NSEvent*)event
+    {
+        /* WineApplication already delivered this click to the Windows client.
+           NSView's default forwards it to NSThemeFrame, which starts a window
+           drag and selects the arrow cursor. */
+    }
+
     - (NSFocusRingType) focusRingType
     {
         return NSFocusRingTypeNone;
