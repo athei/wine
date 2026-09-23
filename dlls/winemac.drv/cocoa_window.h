@@ -105,6 +105,7 @@
 
     - (NSInteger) minimumLevelForActive:(BOOL)active;
     - (void) updateFullscreen;
+    - (BOOL) coversMenuBarScreen;
 
     - (void) postKeyEvent:(NSEvent *)theEvent;
     - (void) postBroughtForwardEvent;
