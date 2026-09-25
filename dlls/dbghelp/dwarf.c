@@ -1032,8 +1032,15 @@ compute_location(const struct module *module, const dwarf2_cuhead_t* head,
         case DW_OP_shr:         stack[stk-1] >>= stack[stk]; stk--; break;
         case DW_OP_plus_uconst: stack[stk] += dwarf2_leb128_as_unsigned(ctx); break;
         case DW_OP_shra:        stack[stk-1] = stack[stk-1] / (1 << stack[stk]); stk--; break;
-        case DW_OP_div:         stack[stk-1] = stack[stk-1] / stack[stk]; stk--; break;
-        case DW_OP_mod:         stack[stk-1] = stack[stk-1] % stack[stk]; stk--; break;
+        case DW_OP_div:
+        case DW_OP_mod:
+            /* DW_OP_bregN pushes only its offset, so a divisor computed
+             * from a register can be 0 here. */
+            if (!stack[stk]) return loc_err_too_complex;
+            if (op == DW_OP_div) stack[stk-1] = stack[stk-1] / stack[stk];
+            else stack[stk-1] = stack[stk-1] % stack[stk];
+            stk--;
+            break;
         case DW_OP_ge:          stack[stk-1] = (stack[stk-1] >= stack[stk]); stk--; break;
         case DW_OP_gt:          stack[stk-1] = (stack[stk-1] >  stack[stk]); stk--; break;
         case DW_OP_le:          stack[stk-1] = (stack[stk-1] <= stack[stk]); stk--; break;
