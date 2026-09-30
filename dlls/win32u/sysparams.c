@@ -5972,6 +5972,15 @@ void sysparams_init(void)
 
 #undef IS_OPTION_TRUE
 
+    /* CW Hack 24067: a compatdb.so rule is applied first, so it wins over
+     * the AppCompatFlags layer below and over the manifest */
+    switch (ntdll_get_compat_dpi_awareness())
+    {
+    case 1: NtUserSetProcessDpiAwarenessContext( NTUSER_DPI_SYSTEM_AWARE, 0 ); break;
+    case 0: NtUserSetProcessDpiAwarenessContext( NTUSER_DPI_UNAWARE, 0 ); break;
+    default: break;
+    }
+
     if (app_compat_flags)
     {
         if (strstr( app_compat_flags, "HIGHDPIAWARE" )) NtUserSetProcessDpiAwarenessContext( NTUSER_DPI_SYSTEM_AWARE, 0 );

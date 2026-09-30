@@ -387,6 +387,27 @@ void prepend_dll_path(const char *path)
         dll_path_maxlen = path_len;
 }
 
+/* CW Hack 24067: process DPI awareness chosen by compatdb.so: -1 unset, 0 unaware,
+ * 1 aware; any other value is treated as unset */
+static int compat_dpi_awareness = -1;
+
+/* CW Hack 24067 */
+__attribute__((visibility("default")))
+void set_compat_dpi_awareness( int aware )
+{
+    compat_dpi_awareness = aware;
+}
+
+/***********************************************************************
+ *           ntdll_get_compat_dpi_awareness  (ntdll.so)
+ *
+ * CW Hack 24067
+ */
+int ntdll_get_compat_dpi_awareness(void)
+{
+    return compat_dpi_awareness;
+}
+
 static void set_dll_path(void)
 {
     char *p, *path = getenv( "WINEDLLPATH" );
