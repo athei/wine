@@ -29,9 +29,11 @@
 
 #include "file.h"
 #include "handle.h"
+#include "process.h"
 #include "request.h"
 #include "thread.h"
 #include "user.h"
+#include "msync.h"
 
 #ifdef HAVE_LINUX_NTSYNC_H
 # include <linux/ntsync.h>
@@ -223,6 +225,149 @@ static int get_obj_inproc_sync( struct object *obj, int *type )
     return fd;
 }
 
+#elif defined(__APPLE__)
+
+#include <fcntl.h>
+
+int get_inproc_device_fd(void)
+{
+    static int fd = -2;
+    if (!do_msync()) return -1;
+    if (fd == -2) fd = open( "/dev/null", O_CLOEXEC | O_RDONLY );
+    return fd;
+}
+
+struct inproc_sync
+{
+    struct object          obj;  /* object header */
+    enum inproc_sync_type  type;
+    struct msync          *msync;
+};
+
+static void inproc_sync_dump( struct object *obj, int verbose );
+static int inproc_sync_signal( struct object *obj, unsigned int access, int signal );
+static void inproc_sync_destroy( struct object *obj );
+
+static const struct object_ops inproc_sync_ops =
+{
+    .size    = sizeof(struct inproc_sync),
+    .type    = &no_type,
+    .dump    = inproc_sync_dump,
+    .signal  = inproc_sync_signal,
+    .destroy = inproc_sync_destroy,
+};
+
+int get_inproc_sync_fd( struct inproc_sync *sync )
+{
+    if (!sync) return -1;
+    if (do_msync()) return (int)sync->msync->shm_idx;
+    return -1;
+}
+
+static struct inproc_sync *create_inproc_sync( enum inproc_sync_type type, int low, int high,
+                                               enum msync_type msync_type )
+{
+    struct inproc_sync *sync;
+
+    if (!(sync = alloc_object( &inproc_sync_ops ))) return NULL;
+    sync->type  = type;
+    sync->msync = create_msync( low, high, msync_type );
+
+    if (!sync->msync)  /* create_msync() sets the error */
+    {
+        release_object( sync );
+        return NULL;
+    }
+    return sync;
+}
+
+/* an event's second word is its pulse word, which starts with no pulse
+ * that a waiter could take */
+struct inproc_sync *create_inproc_internal_sync( int manual, int signaled )
+{
+    return create_inproc_sync( INPROC_SYNC_INTERNAL, signaled, 0,
+                               manual ? MSYNC_MANUAL_SERVER : MSYNC_AUTO_SERVER );
+}
+
+struct inproc_sync *create_inproc_event_sync( int manual, int signaled )
+{
+    return create_inproc_sync( INPROC_SYNC_EVENT, signaled, 0,
+                               manual ? MSYNC_MANUAL_EVENT : MSYNC_AUTO_EVENT );
+}
+
+struct inproc_sync *create_inproc_mutex_sync( thread_id_t owner, unsigned int count )
+{
+    return create_inproc_sync( INPROC_SYNC_MUTEX, owner, count, MSYNC_MUTEX );
+}
+
+struct inproc_sync *create_inproc_semaphore_sync( unsigned int initial, unsigned int max )
+{
+    return create_inproc_sync( INPROC_SYNC_SEMAPHORE, initial, max, MSYNC_SEMAPHORE );
+}
+
+static void inproc_sync_dump( struct object *obj, int verbose )
+{
+    struct inproc_sync *sync = (struct inproc_sync *)obj;
+    assert( obj->ops == &inproc_sync_ops );
+    fprintf( stderr, "Inproc sync type=%d, msync idx=%u\n", sync->type, sync->msync->shm_idx );
+}
+
+void signal_inproc_sync( struct inproc_sync *sync )
+{
+    if (debug_level) fprintf( stderr, "set_inproc_event %u\n", sync->msync->shm_idx );
+    msync_set_event( sync->msync );
+}
+
+void reset_inproc_sync( struct inproc_sync *sync )
+{
+    if (debug_level) fprintf( stderr, "reset_inproc_event %u\n", sync->msync->shm_idx );
+    msync_reset_event( sync->msync );
+}
+
+static int inproc_sync_signal( struct object *obj, unsigned int access, int signal )
+{
+    struct inproc_sync *sync = (struct inproc_sync *)obj;
+    assert( obj->ops == &inproc_sync_ops );
+
+    assert( sync->type == INPROC_SYNC_INTERNAL || sync->type == INPROC_SYNC_EVENT ); /* never called for mutex / semaphore */
+    assert( signal == 0 || signal == 1 ); /* never called from signal_object */
+
+    if (signal) signal_inproc_sync( sync );
+    else reset_inproc_sync( sync );
+    return 1;
+}
+
+static void inproc_sync_destroy( struct object *obj )
+{
+    struct inproc_sync *sync = (struct inproc_sync *)obj;
+    assert( obj->ops == &inproc_sync_ops );
+    if (sync->msync) msync_destroy( sync->msync );
+}
+
+void abandon_inproc_mutexes( thread_id_t tid )
+{
+    if (do_msync()) msync_abandon_mutexes( tid );
+}
+
+static int get_obj_inproc_sync( struct object *obj, int *type )
+{
+    struct object *sync;
+    int shm_idx = -1;
+
+    if (!do_msync()) return -1;
+    if (!(sync = get_obj_sync( obj ))) return -1;
+    if (sync->ops == &inproc_sync_ops)
+    {
+        struct inproc_sync *inproc = (struct inproc_sync *)sync;
+        msync_grab_object( inproc->msync, get_process_id( current->process ));
+        *type = inproc->type;
+        shm_idx = (int)inproc->msync->shm_idx;
+    }
+
+    release_object( sync );
+    return shm_idx;
+}
+
 #else /* NTSYNC_IOC_EVENT_READ */
 
 int get_inproc_device_fd(void)
@@ -284,6 +429,7 @@ DECL_HANDLER(get_inproc_sync_fd)
     reply->access = get_handle_access( current->process, req->handle );
 
     if ((fd = get_obj_inproc_sync( obj, &reply->type )) < 0) set_error( STATUS_NOT_IMPLEMENTED );
+    else if (do_msync()) reply->shm_idx = fd;
     else send_client_fd( current->process, fd, req->handle );
 
     release_object( obj );
