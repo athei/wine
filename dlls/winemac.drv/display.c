@@ -24,6 +24,10 @@
 #endif
 
 #include "config.h"
+
+#include <pthread.h>
+#include <sys/sysctl.h>
+
 #include "macdrv.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(display);
@@ -84,10 +88,28 @@ static int display_mode_bits_per_pixel(CGDisplayModeRef display_mode)
 }
 
 
+static BOOL apple_silicon;
+
+static void detect_apple_silicon(void)
+{
+    int value = 0;
+    size_t size = sizeof(value);
+
+    /* 1 on Apple Silicon, natively and under Rosetta; missing on an Intel Mac */
+    if (!sysctlbyname("hw.optional.arm64", &value, &size, NULL, 0))
+        apple_silicon = value != 0;
+}
+
+
 static BOOL display_mode_is_supported(CGDisplayModeRef display_mode)
 {
+    static pthread_once_t once = PTHREAD_ONCE_INIT;
     uint32_t io_flags = CGDisplayModeGetIOFlags(display_mode);
-    return (io_flags & kDisplayModeValidFlag) && (io_flags & kDisplayModeSafeFlag);
+
+    /* Apple Silicon Macs can leave kDisplayModeSafeFlag off modes they support. */
+    pthread_once(&once, detect_apple_silicon);
+    return (io_flags & kDisplayModeValidFlag) &&
+           ((io_flags & kDisplayModeSafeFlag) || apple_silicon);
 }
 
 
@@ -760,6 +782,11 @@ LONG macdrv_ChangeDisplaySettings(LPDEVMODEW displays, LPCWSTR primary_name, HWN
 
     desc = create_original_display_mode_descriptor(CGMainDisplayID());
 
+    /* win32u holds its display lock across this call.  While the main
+       thread switches the mode, AppKit can start a live resize of a window
+       of this thread, whose query handler reaches the display lock through
+       GetSystemMetrics() and would block this thread on itself. */
+    macdrv_begin_query_deferral();
     for (mode = displays; mode->dmSize && !ret; mode = NEXT_DEVMODEW(mode))
     {
         if (wcsicmp(primary_name, mode->dmDeviceName))
@@ -794,6 +821,7 @@ LONG macdrv_ChangeDisplaySettings(LPDEVMODEW displays, LPCWSTR primary_name, HWN
             ret = DISP_CHANGE_FAILED;
         }
     }
+    macdrv_end_query_deferral();
 
     free_display_mode_descriptor(desc);
     CFRelease(display_modes);
@@ -873,13 +901,17 @@ static DEVMODEW *display_get_modes(CGDirectDisplayID display_id, int *modes_coun
     return devmodes;
 }
 
-static void display_get_current_mode(struct macdrv_monitor *monitor, DEVMODEW *devmode)
+static void display_get_current_mode(struct macdrv_monitor *monitor, CGDisplayModeRef latent_mode,
+                                     DEVMODEW *devmode)
 {
     CGDisplayModeRef display_mode;
     CGDirectDisplayID display_id;
 
     display_id = monitor->id;
-    display_mode = CGDisplayCopyDisplayMode(display_id);
+    if (latent_mode)
+        display_mode = CGDisplayModeRetain(latent_mode);
+    else
+        display_mode = CGDisplayCopyDisplayMode(display_id);
 
     devmode->dmPosition.x = CGRectGetMinX(monitor->rc_monitor);
     devmode->dmPosition.y = CGRectGetMinY(monitor->rc_monitor);
@@ -898,6 +930,31 @@ static void display_get_current_mode(struct macdrv_monitor *monitor, DEVMODEW *d
     }
 
     CFRelease(display_mode);
+}
+
+/* A mode set while the application was inactive is applied by macOS only when
+   the application is next activated, but ChangeDisplaySettings reported it as
+   set.  Until then the monitor reports that mode's size from its current
+   origin, and the work area keeps the distances from the monitor edges that
+   the menu bar and the Dock leave now.  Nothing changes on the screen, so
+   windows are still placed on the real screen with their Windows coordinates. */
+static void apply_latent_mode_to_monitor(struct gdi_monitor *gdi_monitor, const DEVMODEW *latent_devmode)
+{
+    RECT real_monitor = gdi_monitor->rc_monitor, real_work = gdi_monitor->rc_work;
+    RECT *monitor = &gdi_monitor->rc_monitor, *work = &gdi_monitor->rc_work;
+
+    monitor->right = monitor->left + latent_devmode->dmPelsWidth;
+    monitor->bottom = monitor->top + latent_devmode->dmPelsHeight;
+
+    work->left = monitor->left + max(0, real_work.left - real_monitor.left);
+    work->top = monitor->top + max(0, real_work.top - real_monitor.top);
+    work->right = monitor->right - max(0, real_monitor.right - real_work.right);
+    work->bottom = monitor->bottom - max(0, real_monitor.bottom - real_work.bottom);
+    if (work->left >= work->right || work->top >= work->bottom)
+        *work = *monitor;
+
+    TRACE("latent mode %ux%u: monitor %s work %s\n", latent_devmode->dmPelsWidth,
+          latent_devmode->dmPelsHeight, wine_dbgstr_rect(monitor), wine_dbgstr_rect(work));
 }
 
 /***********************************************************************
@@ -1072,6 +1129,7 @@ UINT macdrv_UpdateDisplayDevices(const struct gdi_device_manager *device_manager
         {
             DEVMODEW current_mode = { .dmSize = sizeof(current_mode) };
             UINT dpi = NtUserGetSystemDpiForProcess( NULL );
+            CGDisplayModeRef latent_mode;
             char buffer[32];
 
             snprintf( buffer, sizeof(buffer), "%04x", adapter->id );
@@ -1079,6 +1137,8 @@ UINT macdrv_UpdateDisplayDevices(const struct gdi_device_manager *device_manager
 
             if (macdrv_get_monitors(adapter->id, &monitors, &monitor_count)) break;
             TRACE("adapter: %#x, monitor count: %d\n", adapter->id, monitor_count);
+
+            latent_mode = macdrv_copy_latent_display_mode(adapter->id);
 
             /* Initialize monitors */
             for (monitor = monitors; monitor < monitors + monitor_count; monitor++)
@@ -1091,12 +1151,22 @@ UINT macdrv_UpdateDisplayDevices(const struct gdi_device_manager *device_manager
                     .edid = monitor->edid,
                     .hdr_enabled = monitor->hdr_enabled,
                 };
+
+                if (latent_mode)
+                {
+                    DEVMODEW latent_devmode = { .dmSize = sizeof(latent_devmode) };
+
+                    display_get_current_mode(monitor, latent_mode, &latent_devmode);
+                    apply_latent_mode_to_monitor(&gdi_monitor, &latent_devmode);
+                }
                 device_manager->add_monitor( &gdi_monitor, param );
 
                 /* Get the current mode */
                 if (monitor->id == adapter->id)
-                    display_get_current_mode(monitor, &current_mode);
+                    display_get_current_mode(monitor, latent_mode, &current_mode);
             }
+
+            if (latent_mode) CGDisplayModeRelease(latent_mode);
 
             if (!(modes = display_get_modes(adapter->id, &mode_count))) break;
             device_manager->add_modes( &current_mode, mode_count, modes, param );

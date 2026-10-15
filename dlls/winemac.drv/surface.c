@@ -73,6 +73,36 @@ static void macdrv_surface_set_clip(struct window_surface *window_surface, const
 }
 
 /***********************************************************************
+ *              shape_covers_rect
+ *
+ * Whether a shape bitmap (1 bpp, top-down, the most significant bit for
+ * the lowest x) has every pixel of a rect set, the rect clipped to the
+ * bitmap.  Stops at the first pixel that is not.
+ */
+static bool shape_covers_rect(const BITMAPINFO *info, const BYTE *bits, const RECT *rect)
+{
+    UINT stride = info->bmiHeader.biSizeImage / abs(info->bmiHeader.biHeight);
+    RECT bounds = {0, 0, info->bmiHeader.biWidth, abs(info->bmiHeader.biHeight)}, clipped;
+    int x, y;
+
+    if (!intersect_rect(&clipped, rect, &bounds)) return false;
+
+    for (y = clipped.top; y < clipped.bottom; y++)
+    {
+        const BYTE *row = bits + y * stride;
+
+        for (x = clipped.left; x < clipped.right && (x & 7); x++)
+            if (!(row[x / 8] & (0x80 >> (x & 7)))) return false;
+        for (; x + 8 <= clipped.right; x += 8)
+            if (row[x / 8] != 0xff) return false;
+        for (; x < clipped.right; x++)
+            if (!(row[x / 8] & (0x80 >> (x & 7)))) return false;
+    }
+    return true;
+}
+
+
+/***********************************************************************
  *              macdrv_surface_flush
  */
 static BOOL macdrv_surface_flush(struct window_surface *window_surface, const RECT *rect, const RECT *dirty,
@@ -83,7 +113,25 @@ static BOOL macdrv_surface_flush(struct window_surface *window_surface, const RE
     CGImageAlphaInfo alpha_info = (window_surface->alpha_mask ? kCGImageAlphaPremultipliedFirst : kCGImageAlphaNoneSkipFirst);
     CGColorSpaceRef colorspace;
     CGImageRef image;
-    struct macdrv_win_data *data;
+    struct macdrv_win_data *data = get_win_data(window_surface->hwnd);
+    RECT surface_rect = *rect, dirty_rect = *dirty, view_rect = {0};
+    BOOL have_view_rect = FALSE;
+
+    if (data)
+    {
+        have_view_rect = TRUE;
+        /* The surface starts at the visible rect, which win32u widens for a
+           full-screen window that keeps its aspect ratio; place it on the
+           window rect instead, inside the black bars. */
+        if (get_fullscreen_content_rect(&data->rects, &view_rect))
+            OffsetRect(&surface_rect, view_rect.left, view_rect.top);
+        else
+            SetRect(&view_rect, 0, 0, data->rects.visible.right - data->rects.visible.left,
+                    data->rects.visible.bottom - data->rects.visible.top);
+        /* the part of the surface that shows in the view, in surface coordinates */
+        OffsetRect(&view_rect, -surface_rect.left, -surface_rect.top);
+    }
+    OffsetRect(&dirty_rect, surface_rect.left, surface_rect.top);
 
     colorspace = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
     image = CGImageCreate(color_info->bmiHeader.biWidth, abs(color_info->bmiHeader.biHeight), 8, 32,
@@ -91,40 +139,19 @@ static BOOL macdrv_surface_flush(struct window_surface *window_surface, const RE
                           alpha_info | kCGBitmapByteOrder32Little, surface->provider, NULL, retina_on, kCGRenderingIntentDefault);
     CGColorSpaceRelease(colorspace);
 
-    macdrv_window_set_color_image(surface->window, image, cgrect_from_rect(*rect), cgrect_from_rect(*dirty));
+    macdrv_window_set_color_image(surface->window, image, cgrect_from_rect(surface_rect), cgrect_from_rect(dirty_rect));
     CGImageRelease(image);
 
-    if (shape_changed)
+    if (data)
     {
-        if (!shape_bits)
-            macdrv_window_set_shape_image(surface->window, NULL);
-        else
-        {
-            const BYTE *src = shape_bits;
-            CGDataProviderRef provider;
-            CGImageRef image;
-            BYTE *dst;
-            UINT i;
+        /* a shape change below brings the shape image, which ends a pending region */
+        if (shape_changed) data->shape_pending = FALSE;
+        else set_shape_pending(data, FALSE);
 
-            if (!(provider = data_provider_create(shape_info->bmiHeader.biSizeImage, (void **)&dst))) return TRUE;
-            for (i = 0; i < shape_info->bmiHeader.biSizeImage; i++) dst[i] = ~src[i]; /* CGImage mask bits are inverted */
-
-            image = CGImageMaskCreate(shape_info->bmiHeader.biWidth, abs(shape_info->bmiHeader.biHeight), 1, 1,
-                                      shape_info->bmiHeader.biSizeImage / abs(shape_info->bmiHeader.biHeight),
-                                      provider, NULL, retina_on);
-            CGDataProviderRelease(provider);
-
-            macdrv_window_set_shape_image(surface->window, image);
-            CGImageRelease(image);
-        }
-    }
-
-    /* The window may have been previously drawn with client_surface, for example, when the window
-     * had been a target for a D3D swapchain. Hide the client_view so that it doesn't occlude the
-     * content in the window_surface. Keep it shown while DXMT or mtld3d still present through it:
-     * they show it again only on their next present, so the window would flash. */
-    if ((data = get_win_data(window_surface->hwnd)))
-    {
+        /* The window may have been previously drawn with client_surface, for example, when the window
+         * had been a target for a D3D swapchain. Hide the client_view so that it doesn't occlude the
+         * content in the window_surface. Keep it shown while DXMT or mtld3d still present through it:
+         * they show it again only on their next present, so the window would flash. */
         if (is_d3dmetal_client_view_presenting(data))
             TRACE("keeping client view %p of %p shown\n", data->client_view, window_surface->hwnd);
         else if (data->client_view)
@@ -134,6 +161,37 @@ static BOOL macdrv_surface_flush(struct window_surface *window_surface, const RE
             data->client_view = NULL;
         }
         release_win_data(data);
+    }
+
+    if (shape_changed)
+    {
+        if (!shape_bits)
+            macdrv_window_set_shape_image(surface->window, NULL, FALSE);
+        else
+        {
+            const BYTE *src = shape_bits;
+            CGDataProviderRef provider;
+            CGImageRef image;
+            BYTE *dst;
+            UINT i;
+
+            if (!(provider = data_provider_create(shape_info->bmiHeader.biSizeImage, (void **)&dst)))
+            {
+                /* no shape image follows to end a pending region */
+                macdrv_window_set_shape_pending(surface->window, FALSE);
+                return TRUE;
+            }
+            for (i = 0; i < shape_info->bmiHeader.biSizeImage; i++) dst[i] = ~src[i]; /* CGImage mask bits are inverted */
+
+            image = CGImageMaskCreate(shape_info->bmiHeader.biWidth, abs(shape_info->bmiHeader.biHeight), 1, 1,
+                                      shape_info->bmiHeader.biSizeImage / abs(shape_info->bmiHeader.biHeight),
+                                      provider, NULL, retina_on);
+            CGDataProviderRelease(provider);
+
+            macdrv_window_set_shape_image(surface->window, image,
+                                          have_view_rect && shape_covers_rect(shape_info, src, &view_rect));
+            CGImageRelease(image);
+        }
     }
 
     return TRUE;

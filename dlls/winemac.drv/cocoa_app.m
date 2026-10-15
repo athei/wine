@@ -28,6 +28,8 @@
 
 #pragma GCC diagnostic ignored "-Wdeclaration-after-statement"
 
+WINE_DEFAULT_DEBUG_CHANNEL(macdrv);
+
 
 static NSString* const WineAppWaitQueryResponseMode = @"WineAppWaitQueryResponseMode";
 
@@ -42,6 +44,12 @@ static NSString* const WineAppWillActivateNotification = @"WineAppWillActivateNo
 static NSString* const WineActivatingAppPIDKey = @"ActivatingAppPID";
 static NSString* const WineActivatingAppPrefixKey = @"ActivatingAppPrefix";
 static NSString* const WineActivatingAppConfigDirKey = @"ActivatingAppConfigDir";
+
+/* How long after activation or a full-screen or display change the cursor
+   is set again without trusting +[NSCursor currentCursor], and the least
+   time between two such sets driven by mouse moves. */
+static const NSTimeInterval WineCursorReassertInterval = 0.5;
+static const NSTimeInterval WineCursorReassertMoveSpacing = 0.05;
 
 
 #if !defined(MAC_OS_VERSION_14_0) || MAC_OS_X_VERSION_MAX_ALLOWED < MAC_OS_VERSION_14_0
@@ -176,11 +184,13 @@ static NSString* WineLocalizedString(unsigned int stringID)
 
             originalDisplayModes = [[NSMutableDictionary alloc] init];
             latentDisplayModes = [[NSMutableDictionary alloc] init];
+            reportedLatentDisplayModes = [[NSMutableDictionary alloc] init];
 
             windowsBeingDragged = [[NSMutableSet alloc] init];
 
             if (!requests || !requestsManipQueue || !eventQueues || !eventQueuesLock ||
-                !keyWindows || !originalDisplayModes || !latentDisplayModes)
+                !keyWindows || !originalDisplayModes || !latentDisplayModes ||
+                !reportedLatentDisplayModes)
             {
                 [self release];
                 return nil;
@@ -205,6 +215,8 @@ static NSString* WineLocalizedString(unsigned int stringID)
         [clipCursorHandler release];
         [cursorTimer release];
         [cursorFrames release];
+        [builtCursorFrames release];
+        [reportedLatentDisplayModes release];
         [latentDisplayModes release];
         [originalDisplayModes release];
         [keyWindows release];
@@ -374,12 +386,20 @@ static NSString* WineLocalizedString(unsigned int stringID)
 
     - (void) windowGotFocus:(WineWindow*)window
     {
+        [self windowGotFocus:window requested:NO];
+    }
+
+    /* requested: Wine made the window key itself, for a window that Windows
+       had made the foreground window. */
+    - (void) windowGotFocus:(WineWindow*)window requested:(BOOL)requested
+    {
         macdrv_event* event;
 
         [self invalidateGotFocusEvents];
 
         event = macdrv_create_event(WINDOW_GOT_FOCUS, window);
         event->window_got_focus.serial = windowFocusSerial;
+        event->window_got_focus.requested = requested;
         if (triedWindows)
             event->window_got_focus.tried_windows = [triedWindows retain];
         else
@@ -572,6 +592,23 @@ static NSString* WineLocalizedString(unsigned int stringID)
         return nil;
     }
 
+    /* The window that gets the raw movement of a GameController mouse: the
+       one that captures the mouse, else the one the last mouse move went to,
+       else the key window or the front Wine window.  None while a window is
+       being dragged, when mouse moves go nowhere either. */
+    - (WineWindow*) rawMouseTargetWindow
+    {
+        WineWindow* window;
+
+        if ([windowsBeingDragged count]) return nil;
+        if (mouseCaptureWindow) return mouseCaptureWindow;
+        if (lastTargetWindow) return lastTargetWindow;
+
+        window = (WineWindow*)[NSApp keyWindow];
+        if ([window isKindOfClass:[WineWindow class]]) return window;
+        return [self frontWineWindow];
+    }
+
     - (void) adjustWindowLevels:(BOOL)active
     {
         NSArray* windowNumbers;
@@ -618,7 +655,8 @@ static NSString* WineLocalizedString(unsigned int stringID)
             NSInteger origLevel = [window level];
             NSInteger newLevel = [window minimumLevelForActive:active];
 
-            if (window.floating)
+            /* The Dock is hidden while a window covers the screen. */
+            if (window.floating && !window.fullscreen)
             {
                 if (minFloatingLevel <= maxNonfloatingLevel)
                     minFloatingLevel = maxNonfloatingLevel + 1;
@@ -693,6 +731,72 @@ static NSString* WineLocalizedString(unsigned int stringID)
                     [window setLevel:newLevel];
             }
         }
+
+        [self updateFullscreenPresentation:active];
+    }
+
+    /* While the application is active and a visible window covers the screen
+       with the menu bar, hide the Dock and menu bar.  macOS restores them for
+       other applications on its own, so they are left alone while the
+       application is inactive: setting them from applicationWillResignActive:
+       makes the window server bring the application back to the front, and
+       Cmd-Tab away from a full-screen game bounced straight back into it.
+       applicationDidBecomeActive: computes them again. */
+    - (void) updateFullscreenPresentation:(BOOL)active
+    {
+        NSApplicationPresentationOptions current = [NSApp presentationOptions];
+        NSApplicationPresentationOptions options = current & NSApplicationPresentationDisableCursorLocationAssistance;
+        WineWindow* window;
+
+        if (!active) return;
+
+        /* AppKit owns the options of a window in native fullscreen. */
+        if (current & NSApplicationPresentationFullScreen) return;
+
+        /* -miniaturize: only starts a minimize: the window stays visible and
+           not miniaturized until the window manager has answered and AppKit
+           has asked the Dock.  A Dock that is hidden by then holds the request
+           back, and AppKit waits 8 s for it on the main thread.  So the Dock
+           stays as -prepareToMiniaturize left it until windowDidMiniaturize:
+           comes here again. */
+        for (window in [NSApp windows])
+        {
+            if ([window isKindOfClass:[WineWindow class]] && window.miniaturizing && ![window isMiniaturized])
+                return;
+        }
+
+        if (![self areDisplaysCaptured])
+        {
+            for (window in [NSApp windows])
+            {
+                if ([window isKindOfClass:[WineWindow class]] && [window isVisible] &&
+                    ![window isMiniaturized] && [window isOnActiveSpace] && [window coversMenuBarScreen])
+                {
+                    options |= NSApplicationPresentationHideDock | NSApplicationPresentationHideMenuBar;
+                    break;
+                }
+            }
+        }
+
+        if (options != current)
+        {
+            [NSApp setPresentationOptions:options];
+            [self reassertCursorSoon];
+        }
+    }
+
+    /* AppKit silently ignores -miniaturize: while the Dock is hidden through
+       the presentation options, which would leave a window Windows considers
+       minimized on the screen with nothing to restore it from.  Show the Dock
+       and menu bar first; -updateFullscreenPresentation: hides them again
+       after the minimize if a window still covers the screen. */
+    - (void) prepareToMiniaturize
+    {
+        NSApplicationPresentationOptions hidden = NSApplicationPresentationHideDock | NSApplicationPresentationHideMenuBar;
+        NSApplicationPresentationOptions current = [NSApp presentationOptions];
+
+        if ((current & ~NSApplicationPresentationDisableCursorLocationAssistance) == hidden)
+            [NSApp setPresentationOptions:current & ~hidden];
     }
 
     - (void) adjustWindowLevels
@@ -702,6 +806,8 @@ static NSString* WineLocalizedString(unsigned int stringID)
 
     - (void) updateFullscreenWindows
     {
+        [self reassertCursorSoon];
+
         if (capture_displays_for_fullscreen && [NSApp isActive])
         {
             BOOL anyFullscreen = FALSE;
@@ -809,6 +915,33 @@ static NSString* WineLocalizedString(unsigned int stringID)
         return ret;
     }
 
+    /* A mode set while the application is inactive is only applied when it is
+       next activated, but ChangeDisplaySettings reports it as set.  Remember
+       it, so that the display settings and the monitor rects Windows gets
+       report that mode until then.  A NULL mode reports the real mode again.
+       Called on the main thread; read from any thread. */
+    - (void) reportLatentMode:(CGDisplayModeRef)mode forDisplay:(NSNumber*)displayIDKey
+    {
+        @synchronized(reportedLatentDisplayModes)
+        {
+            if (mode)
+                [reportedLatentDisplayModes setObject:(id)mode forKey:displayIDKey];
+            else
+                [reportedLatentDisplayModes removeObjectForKey:displayIDKey];
+        }
+    }
+
+    - (CGDisplayModeRef) copyReportedLatentModeForDisplay:(CGDirectDisplayID)displayID
+    {
+        CGDisplayModeRef mode;
+
+        @synchronized(reportedLatentDisplayModes)
+        {
+            mode = CGDisplayModeRetain((CGDisplayModeRef)reportedLatentDisplayModes[@(displayID)]);
+        }
+        return mode;
+    }
+
     - (BOOL) setMode:(CGDisplayModeRef)mode forDisplay:(CGDirectDisplayID)displayID
     {
         BOOL ret = FALSE;
@@ -843,10 +976,11 @@ static NSString* WineLocalizedString(unsigned int stringID)
         }
         else
         {
-            CGDisplayModeRef currentMode;
+            CGDisplayModeRef currentMode, latentMode;
             NSArray* modes;
 
-            currentMode = CGDisplayModeRetain((CGDisplayModeRef)latentDisplayModes[displayIDKey]);
+            latentMode = (CGDisplayModeRef)latentDisplayModes[displayIDKey];
+            currentMode = CGDisplayModeRetain(latentMode);
             if (!currentMode)
                 currentMode = CGDisplayCopyDisplayMode(displayID);
             if (!currentMode) // Invalid display ID
@@ -854,12 +988,34 @@ static NSString* WineLocalizedString(unsigned int stringID)
 
             if ([self mode:mode matchesMode:currentMode]) // Already there!
             {
+                /* The mode is set once the application is active again.  Until
+                   then, Windows is told it is the current one. */
+                if (latentMode)
+                    [self reportLatentMode:latentMode forDisplay:displayIDKey];
                 CGDisplayModeRelease(currentMode);
                 return TRUE;
             }
 
             CGDisplayModeRelease(currentMode);
             currentMode = NULL;
+
+            /* While the application is inactive, a request for the mode the
+               display really has, such as the reset after a mode set while
+               inactive, drops the mode that was waiting for the activation. */
+            if (latentMode && ![NSApp isActive])
+            {
+                CGDisplayModeRef realMode = CGDisplayCopyDisplayMode(displayID);
+                BOOL isRealMode = realMode && [self mode:mode matchesMode:realMode];
+
+                CGDisplayModeRelease(realMode);
+                if (isRealMode)
+                {
+                    [latentDisplayModes removeObjectForKey:displayIDKey];
+                    [self reportLatentMode:NULL forDisplay:displayIDKey];
+                    [self adjustWindowLevels];
+                    return TRUE;
+                }
+            }
 
             modes = [self modesMatchingMode:mode forDisplay:displayID];
             if (!modes.count)
@@ -909,6 +1065,7 @@ static NSString* WineLocalizedString(unsigned int stringID)
                 else
                 {
                     [latentDisplayModes setObject:(id)mode forKey:displayIDKey];
+                    [self reportLatentMode:mode forDisplay:displayIDKey];
                     ret = TRUE;
                 }
             }
@@ -925,41 +1082,132 @@ static NSString* WineLocalizedString(unsigned int stringID)
         return ([originalDisplayModes count] > 0 || displaysCapturedForFullscreen);
     }
 
+    /* A fully transparent cursor, set instead of [NSCursor hide].
+       Toggling the cursor plane off and on makes the window server present
+       the next frames of a full-screen Metal layer one refresh late, which
+       a game hiding the cursor while a mouse button is held turns into a
+       sustained frame-rate drop under rapid clicking (measured 120 -> ~107
+       fps; with the toggle gone the rate holds).  Swapping the cursor
+       image has no such cost, so hidden = blank image, plane always on. */
+    static NSCursor* blank_cursor(void)
+    {
+        static NSCursor* blank;
+        if (!blank)
+        {
+            NSBitmapImageRep* rep = [[NSBitmapImageRep alloc]
+                initWithBitmapDataPlanes:NULL
+                              pixelsWide:1
+                              pixelsHigh:1
+                           bitsPerSample:8
+                         samplesPerPixel:4
+                                hasAlpha:YES
+                                isPlanar:NO
+                          colorSpaceName:NSDeviceRGBColorSpace
+                             bytesPerRow:4
+                            bitsPerPixel:32];
+            NSImage* image = [[NSImage alloc] initWithSize:NSMakeSize(1, 1)];
+            memset([rep bitmapData], 0, 4);
+            [image addRepresentation:rep];
+            [rep release];
+            blank = [[NSCursor alloc] initWithImage:image hotSpot:NSZeroPoint];
+            [image release];
+        }
+        return blank;
+    }
+
+    /* Cursor Location Assistance (shake to locate) can hold back presents the
+       way hiding the cursor does, so it is off while the pointer is on a Wine
+       window, whatever the cursor.  The options are left alone while inactive
+       (see updateFullscreenPresentation:) and in native full screen, where
+       window:willUseFullScreenPresentationOptions: sets the bit. */
+    - (void) updateCursorLocationAssistance
+    {
+        NSApplicationPresentationOptions current, options;
+
+        if (![NSApp isActive]) return;
+
+        current = [NSApp presentationOptions];
+        if (current & NSApplicationPresentationFullScreen) return;
+
+        if (lastTargetWindow)
+            options = current | NSApplicationPresentationDisableCursorLocationAssistance;
+        else
+            options = current & ~NSApplicationPresentationDisableCursorLocationAssistance;
+
+        if (options != current)
+            [NSApp setPresentationOptions:options];
+    }
+
+    /* +[NSCursor currentCursor] is AppKit's record of the last cursor this
+       application set, not what the window server shows.  The two can
+       differ, for example when the cursor was set while the application was
+       inactive, or when activation or a full-screen switch put the arrow
+       back, so a forced update sets the cursor without consulting it.
+       Ordinary updates on every mouse move keep the check, which is cheap. */
     - (void) updateCursor:(BOOL)force
     {
         if (force || lastTargetWindow)
         {
-            if (clientWantsCursorHidden && !cursorHidden)
+            if (clientWantsCursorHidden)
             {
-                [NSCursor hide];
-                cursorHidden = TRUE;
+                if (force || !cursorHidden || [NSCursor currentCursor] != blank_cursor())
+                {
+                    [blank_cursor() set];
+                    cursorIsCurrent = FALSE;
+                    cursorHidden = TRUE;
+                }
             }
-
-            if (!cursorIsCurrent)
+            else if (force || !cursorIsCurrent || cursorHidden || [NSCursor currentCursor] != cursor)
             {
                 [cursor set];
                 cursorIsCurrent = TRUE;
-            }
-
-            if (!clientWantsCursorHidden && cursorHidden)
-            {
-                [NSCursor unhide];
                 cursorHidden = FALSE;
             }
         }
         else
         {
-            if (cursorIsCurrent)
+            if (cursorIsCurrent || cursorHidden)
             {
                 [[NSCursor arrowCursor] set];
                 cursorIsCurrent = FALSE;
-            }
-            if (cursorHidden)
-            {
-                [NSCursor unhide];
                 cursorHidden = FALSE;
             }
         }
+    }
+
+    /* The window server may still be finishing an activation or a
+       full-screen or display change when the first mouse move arrives, and
+       a game driven by keyboard or gamepad sends none.  So for a short time
+       after such a change, moves over a Wine window force the cursor, and
+       one deferred update forces it once more after that time.  A burst of
+       changes shares the deferred update, which waits for the last one. */
+    - (void) reassertCursorSoon
+    {
+        cursorReassertTime = [[NSProcessInfo processInfo] systemUptime];
+        if (!cursorReassertScheduled)
+        {
+            cursorReassertScheduled = TRUE;
+            [self scheduleCursorReassert:WineCursorReassertInterval];
+        }
+    }
+
+    - (void) scheduleCursorReassert:(NSTimeInterval)delay
+    {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            NSTimeInterval remaining = cursorReassertTime + WineCursorReassertInterval -
+                                       [[NSProcessInfo processInfo] systemUptime];
+
+            if (remaining > 0.01)
+            {
+                [self scheduleCursorReassert:remaining];
+                return;
+            }
+
+            cursorReassertScheduled = FALSE;
+            if ([NSApp isActive] && [self wineWindowUnderPoint:[NSEvent mouseLocation]])
+                [self updateCursor:TRUE];
+        });
     }
 
     - (void) hideCursor
@@ -984,6 +1232,8 @@ static NSString* WineLocalizedString(unsigned int stringID)
     {
         if (newCursor != cursor)
         {
+            [builtCursorFrames release];
+            builtCursorFrames = nil;
             [cursor release];
             cursor = [newCursor retain];
             cursorIsCurrent = FALSE;
@@ -995,16 +1245,22 @@ static NSString* WineLocalizedString(unsigned int stringID)
     {
         NSDictionary* frame = cursorFrames[cursorFrame];
         CGImageRef cgimage = (CGImageRef)frame[@"image"];
-        CGSize size = CGSizeMake(CGImageGetWidth(cgimage), CGImageGetHeight(cgimage));
+        CGSize size = CGSizeMake(CGImageGetWidth(cgimage) * cursorScale,
+                                 CGImageGetHeight(cgimage) * cursorScale);
         NSImage* image = [[NSImage alloc] initWithCGImage:cgimage size:NSSizeFromCGSize(cgsize_mac_from_win(size))];
         CFDictionaryRef hotSpotDict = (CFDictionaryRef)frame[@"hotSpot"];
         CGPoint hotSpot;
 
         if (!CGPointMakeWithDictionaryRepresentation(hotSpotDict, &hotSpot))
             hotSpot = CGPointZero;
+        hotSpot.x *= cursorScale;
+        hotSpot.y *= cursorScale;
         hotSpot = cgpoint_mac_from_win(hotSpot);
         self.cursor = [[[NSCursor alloc] initWithImage:image hotSpot:NSPointFromCGPoint(hotSpot)] autorelease];
         [image release];
+        builtCursorFrames = [cursorFrames retain];
+        builtCursorFrame = cursorFrame;
+        builtCursorScale = cursorScale;
         [self unhideCursor];
     }
 
@@ -1025,13 +1281,15 @@ static NSString* WineLocalizedString(unsigned int stringID)
         [cursorTimer setFireDate:date];
     }
 
-    - (void) setCursorWithFrames:(NSArray*)frames
+    - (void) setCursorWithFrames:(NSArray*)frames scale:(CGFloat)scale
     {
-        if (self.cursorFrames == frames || [self.cursorFrames isEqualToArray:frames])
+        if ((self.cursorFrames == frames || [self.cursorFrames isEqualToArray:frames]) &&
+            (!frames || cursorScale == scale))
             return;
 
         self.cursorFrames = frames;
         cursorFrame = 0;
+        cursorScale = scale;
         [cursorTimer invalidate];
         self.cursorTimer = nil;
 
@@ -1051,7 +1309,19 @@ static NSString* WineLocalizedString(unsigned int stringID)
                 [[NSRunLoop currentRunLoop] addTimer:cursorTimer forMode:NSRunLoopCommonModes];
             }
 
-            [self setCursor];
+            /* A hidden -> shown round trip arrives as frames -> nil -> the
+               same frames (the per-HCURSOR frame arrays are cached).  The
+               cursor built from those frames is still set: rebuilding it and
+               [cursor set]ing pushes a fresh cursor image to the window
+               server on every show, which can slip the next presents by a
+               whole refresh (measured as a 120 Hz game dropping to ~107 fps
+               under rapid clicking, one to two late presents per show).
+               Reuse it and just unhide. */
+            if (builtCursorFrame == 0 && builtCursorScale == scale &&
+                [builtCursorFrames isEqualToArray:frames])
+                [self unhideCursor];
+            else
+                [self setCursor];
         }
     }
 
@@ -1325,10 +1595,27 @@ static NSString* WineLocalizedString(unsigned int stringID)
         macdrv_release_event(event);
     }
 
+    /* The WineWindow whose content area is under a point in Cocoa screen
+       coordinates, or nil. */
+    - (WineWindow*) wineWindowUnderPoint:(NSPoint)point
+    {
+        NSInteger windowUnderNumber;
+        WineWindow* window;
+
+        windowUnderNumber = [NSWindow windowNumberAtPoint:point
+                              belowWindowWithWindowNumber:0];
+        window = (WineWindow*)[NSApp windowWithWindowNumber:windowUnderNumber];
+        if (![window isKindOfClass:[WineWindow class]] ||
+            !NSMouseInRect(point, [window contentRectForFrameRect:[window frame]], NO))
+            window = nil;
+        return window;
+    }
+
     - (void) handleMouseMove:(NSEvent*)anEvent
     {
         WineWindow* targetWindow;
         BOOL drag = [anEvent type] != NSEventTypeMouseMoved;
+        BOOL wasOnWineWindow = lastTargetWindow != nil;
 
         if ([windowsBeingDragged count])
             targetWindow = nil;
@@ -1344,13 +1631,8 @@ static NSString* WineLocalizedString(unsigned int stringID)
                cursor and post the event as being for that window. */
             CGPoint cgpoint = CGEventGetLocation([anEvent CGEvent]);
             NSPoint point = [self flippedMouseLocation:NSPointFromCGPoint(cgpoint)];
-            NSInteger windowUnderNumber;
 
-            windowUnderNumber = [NSWindow windowNumberAtPoint:point
-                                  belowWindowWithWindowNumber:0];
-            targetWindow = (WineWindow*)[NSApp windowWithWindowNumber:windowUnderNumber];
-            if (!NSMouseInRect(point, [targetWindow contentRectForFrameRect:[targetWindow frame]], NO))
-                targetWindow = nil;
+            targetWindow = [self wineWindowUnderPoint:point];
         }
 
         if ([targetWindow isKindOfClass:[WineWindow class]])
@@ -1469,7 +1751,21 @@ static NSString* WineLocalizedString(unsigned int stringID)
         else
             lastTargetWindow = nil;
 
-        [self updateCursor:FALSE];
+        if (wasOnWineWindow != (lastTargetWindow != nil))
+            [self updateCursorLocationAssistance];
+
+        /* Shortly after activation or a full-screen or display change the
+           window server can show a cursor other than the one AppKit last
+           recorded (see reassertCursorSoon). */
+        if (lastTargetWindow &&
+            [anEvent timestamp] - cursorReassertTime < WineCursorReassertInterval &&
+            [anEvent timestamp] - lastCursorReassertMoveTime >= WineCursorReassertMoveSpacing)
+        {
+            lastCursorReassertMoveTime = [anEvent timestamp];
+            [self updateCursor:TRUE];
+        }
+        else
+            [self updateCursor:FALSE];
     }
 
     - (void) handleMouseButton:(NSEvent*)theEvent
@@ -1872,7 +2168,10 @@ static NSString* WineLocalizedString(unsigned int stringID)
                 return;
             [keyWindows removeObjectIdenticalTo:window];
             if (window == lastTargetWindow)
+            {
                 lastTargetWindow = nil;
+                [self updateCursorLocationAssistance];
+            }
             if (window == self.mouseCaptureWindow)
                 self.mouseCaptureWindow = nil;
             if ([window isKindOfClass:[WineWindow class]] && [(WineWindow*)window isFullscreen])
@@ -2167,6 +2466,7 @@ static NSString* WineLocalizedString(unsigned int stringID)
            Accumulated mouse movement deltas are invalidated.  Make sure the
            next mouse move event starts over from an absolute baseline. */
         forceNextMouseMoveAbsolute = TRUE;
+        [self reassertCursorSoon];
 
         userInfo = @{
             WineDisplayConfigurationNotificationDisplayIDKey: @(display),
@@ -2203,6 +2503,16 @@ static NSString* WineLocalizedString(unsigned int stringID)
         NSDictionary* modesToRealize = [latentDisplayModes autorelease];
 
         latentDisplayModes = [[NSMutableDictionary alloc] init];
+
+        /* From here on Windows gets the real modes again, which the modes
+           set below become; a mode that cannot be set is no longer reported
+           either.  The displays-changed event sent below makes Windows read
+           them. */
+        @synchronized(reportedLatentDisplayModes)
+        {
+            [reportedLatentDisplayModes removeAllObjects];
+        }
+
         for (displayID in modesToRealize)
         {
             CGDisplayModeRef mode = (CGDisplayModeRef)modesToRealize[displayID];
@@ -2211,6 +2521,10 @@ static NSString* WineLocalizedString(unsigned int stringID)
 
         [self updateFullscreenWindows];
         [self adjustWindowLevels:YES];
+
+        /* Raw mouse input only goes to the foreground, so a process that is
+           never active does not need GameController. */
+        macdrv_start_gcmouse();
 
         if (beenActive)
             [self unminimizeWindowIfNoneVisible];
@@ -2232,6 +2546,16 @@ static NSString* WineLocalizedString(unsigned int stringID)
         // movement deltas are invalidated.  Make sure the next mouse move event
         // starts over from an absolute baseline.
         forceNextMouseMoveAbsolute = TRUE;
+
+        /* Another application may have set the cursor, and a pointer move
+           while inactive left the presentation options alone.  While
+           inactive, moves only arrive from inside Wine windows, so
+           lastTargetWindow can be stale; look up the window under the
+           pointer instead.  Force the cursor only over a Wine window, and
+           elsewhere, such as over the Dock, put the arrow back. */
+        lastTargetWindow = [self wineWindowUnderPoint:[NSEvent mouseLocation]];
+        [self updateCursor:lastTargetWindow != nil];
+        [self updateCursorLocationAssistance];
     }
 
     - (void)applicationDidResignActive:(NSNotification *)notification
@@ -2358,7 +2682,16 @@ static void PerformRequest(void *info)
             if (!block)
                 break;
 
-            block();
+            /* Keep going: an exception escaping from here would leave the
+               remaining requests queued until the next one is signaled. */
+            @try
+            {
+                block();
+            }
+            @catch (id e)
+            {
+                ERR("Exception discarded while performing a request: %s\n", debugstr_cf(e));
+            }
             [block release];
         }
     }
@@ -2405,6 +2738,12 @@ void macdrv_window_rejected_focus(const macdrv_event *event)
  */
 void macdrv_get_input_source_info(CFDataRef* uchr, CGEventSourceKeyboardType* keyboard_type, bool* is_iso, TISInputSourceRef* input_source)
 {
+    *uchr = NULL;
+    *keyboard_type = 0;
+    *is_iso = false;
+    if (input_source)
+        *input_source = NULL;
+
     OnMainThread(^{
         TISInputSourceRef inputSourceLayout;
 
@@ -2441,13 +2780,25 @@ void macdrv_beep(void)
  */
 int macdrv_set_display_mode(CGDirectDisplayID displayID, CGDisplayModeRef display_mode)
 {
-    __block int ret;
+    __block int ret = 0;
 
     OnMainThread(^{
         ret = [[WineApplicationController sharedController] setMode:display_mode forDisplay:displayID];
     });
 
     return ret;
+}
+
+/***********************************************************************
+ *              macdrv_copy_latent_display_mode
+ *
+ * Return a retained reference to the mode macdrv_set_display_mode() set
+ * for the display while the application was inactive and that is not
+ * applied yet, or NULL if there is none.  Any thread may call this.
+ */
+CGDisplayModeRef macdrv_copy_latent_display_mode(CGDirectDisplayID displayID)
+{
+    return [[WineApplicationController sharedController] copyReportedLatentModeForDisplay:displayID];
 }
 
 /***********************************************************************
@@ -2468,10 +2819,13 @@ int macdrv_set_display_mode(CGDirectDisplayID displayID, CGDisplayModeRef displa
  * This is the hot spot, measured in pixels down and to the right of the
  * top-left corner of the image.
  *
+ * scale multiplies the size of every frame image and its hot spot.  It
+ * lets a cursor shown over a DPI-scaled window grow with the window.
+ *
  * If the array has exactly 1 element, the cursor is static, not
  * animated.  If frames is NULL or has 0 elements, the cursor is hidden.
  */
-void macdrv_set_cursor(CFStringRef name, CFArrayRef frames)
+void macdrv_set_cursor(CFStringRef name, CFArrayRef frames, CGFloat scale)
 {
     SEL sel;
 
@@ -2480,7 +2834,7 @@ void macdrv_set_cursor(CFStringRef name, CFArrayRef frames)
     {
         OnMainThreadAsync(^{
             WineApplicationController* controller = [WineApplicationController sharedController];
-            [controller setCursorWithFrames:nil];
+            [controller setCursorWithFrames:nil scale:1];
             controller.cursor = [NSCursor performSelector:sel];
             [controller unhideCursor];
         });
@@ -2491,14 +2845,14 @@ void macdrv_set_cursor(CFStringRef name, CFArrayRef frames)
         if ([nsframes count])
         {
             OnMainThreadAsync(^{
-                [[WineApplicationController sharedController] setCursorWithFrames:nsframes];
+                [[WineApplicationController sharedController] setCursorWithFrames:nsframes scale:scale];
             });
         }
         else
         {
             OnMainThreadAsync(^{
                 WineApplicationController* controller = [WineApplicationController sharedController];
-                [controller setCursorWithFrames:nil];
+                [controller setCursorWithFrames:nil scale:1];
                 [controller hideCursor];
             });
         }
@@ -2513,13 +2867,16 @@ void macdrv_set_cursor(CFStringRef name, CFArrayRef frames)
  */
 int macdrv_get_cursor_position(CGPoint *pos)
 {
+    __block int ret = FALSE;
+
     OnMainThread(^{
         NSPoint location = [NSEvent mouseLocation];
         location = [[WineApplicationController sharedController] flippedMouseLocation:location];
         *pos = cgpoint_win_from_mac(NSPointToCGPoint(location));
+        ret = TRUE;
     });
 
-    return TRUE;
+    return ret;
 }
 
 /***********************************************************************
@@ -2530,7 +2887,7 @@ int macdrv_get_cursor_position(CGPoint *pos)
  */
 int macdrv_set_cursor_position(CGPoint pos)
 {
-    __block int ret;
+    __block int ret = 0;
 
     OnMainThread(^{
         ret = [[WineApplicationController sharedController] setCursorPosition:cgpoint_mac_from_win(pos)];
@@ -2548,7 +2905,7 @@ int macdrv_set_cursor_position(CGPoint pos)
  */
 int macdrv_clip_cursor(CGRect r)
 {
-    __block int ret;
+    __block int ret = 0;
 
     OnMainThread(^{
         WineApplicationController* controller = [WineApplicationController sharedController];
@@ -2618,7 +2975,7 @@ void macdrv_quit_reply(int reply)
  */
 bool macdrv_using_input_method(void)
 {
-    __block bool ret;
+    __block bool ret = false;
 
     OnMainThread(^{
         ret = [[WineApplicationController sharedController] inputSourceIsInputMethod];

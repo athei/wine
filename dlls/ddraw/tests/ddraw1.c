@@ -3048,6 +3048,7 @@ static void test_coop_level_mode_set(void)
     struct test_coop_level_mode_set_enum_param param;
     BOOL ret;
     LONG change_ret;
+    DWORD start, elapsed;
 
     static const struct message exclusive_messages[] =
     {
@@ -3280,6 +3281,7 @@ static void test_coop_level_mode_set(void)
             wine_dbgstr_rect(&r));
 
     expect_messages = exclusive_focus_loss_messages;
+    start = GetTickCount();
     ret = SetForegroundWindow(foreground);
     ok(ret, "Failed to set foreground window.\n");
     ok(!expect_messages->message, "Expected message %#x, but didn't receive it.\n", expect_messages->message);
@@ -3294,6 +3296,10 @@ static void test_coop_level_mode_set(void)
     expect_messages = exclusive_focus_restore_messages;
     ShowWindow(window, SW_RESTORE);
     ok(!expect_messages->message, "Expected message %#x, but didn't receive it.\n", expect_messages->message);
+    /* The minimize and the restore take an animation each, below a second,
+     * and the two display mode changes a few seconds at most. */
+    elapsed = GetTickCount() - start;
+    ok(elapsed < 7000, "Focus loss and restore took %lu ms.\n", elapsed);
 
     GetWindowRect(window, &r);
     ok(EqualRect(&r, &ddraw_rect), "Expected %s, got %s.\n", wine_dbgstr_rect(&ddraw_rect),
