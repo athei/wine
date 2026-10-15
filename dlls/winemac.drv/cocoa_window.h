@@ -35,6 +35,8 @@
     BOOL maximized;
     BOOL fullscreen;
     BOOL pendingMinimize;
+    BOOL miniaturizing;
+    BOOL restoreWhenMiniaturized;
     BOOL pendingOrderOut;
     BOOL savedVisibleState;
     BOOL drawnSinceShown;
@@ -45,8 +47,8 @@
     void* hwnd;
     WineEventQueue* queue;
 
-    NSRect wineFrame;
-    NSRect roundedWineFrame;
+    NSRect wineContentRect;
+    NSRect roundedWineContentRect;
 
     BOOL shapeChangedSinceLastDraw;
 
@@ -56,9 +58,19 @@
 
     NSRect frameAtResizeStart;
     BOOL resizingFromLeft, resizingFromTop;
+    BOOL adjustingToScreen;
+    BOOL liveResizeForScreen;
 
     void* ime_update;
     BOOL commandDone;
+
+    /* In Win32 screen coordinates, guarded by ime_composition_rect_mutex:
+       the rect the program set for the input method window, and the one
+       used when it never set one. */
+    CGRect imeCompositionRect;
+    CGRect imeFallbackRect;
+    BOOL imeCompositionRectSet;
+    BOOL imeFallbackRectSet;
 
     NSSize savedContentMinSize;
     NSSize savedContentMaxSize;
@@ -81,6 +93,8 @@
     BOOL fakingClose;
 
     CAShapeLayer* contentViewMaskLayer;
+    CGRect contentViewMaskRect;
+    BOOL shapePending;
 }
 
 @property (retain, readonly, nonatomic) WineEventQueue* queue;
@@ -90,6 +104,11 @@
 @property (readonly, nonatomic) BOOL floating;
 @property (readonly, getter=isFullscreen, nonatomic) BOOL fullscreen;
 @property (readonly, getter=isFakingClose, nonatomic) BOOL fakingClose;
+/* A minimize that Windows asked for has not reached the Dock yet. */
+@property (readonly, nonatomic) BOOL miniaturizing;
+/* Set on the main thread when the window is being destroyed. From then on
+   the references that events and queries hold may be the last ones. */
+@property (readonly, nonatomic) BOOL closing;
 @property (readonly, nonatomic) NSRect wine_fractionalFrame;
 
 /* Whether this window, when ordered in and not miniaturized, would appear to
@@ -99,6 +118,7 @@
 
     - (NSInteger) minimumLevelForActive:(BOOL)active;
     - (void) updateFullscreen;
+    - (BOOL) coversMenuBarScreen;
 
     - (void) postKeyEvent:(NSEvent *)theEvent;
     - (void) postBroughtForwardEvent;
@@ -108,5 +128,8 @@
     - (void) updateForCursorClipping;
 
     - (void) setRetinaMode:(BOOL)mode;
+
+    - (void) setImeCompositionRect:(CGRect)rect fallback:(BOOL)fallback;
+    - (BOOL) getImeCompositionRect:(CGRect*)rect;
 
 @end

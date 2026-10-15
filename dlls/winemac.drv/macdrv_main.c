@@ -50,6 +50,11 @@ bool allow_immovable_windows = true;
 bool use_confinement_cursor_clipping = true;
 bool cursor_clipping_locks_windows = true;
 bool use_precise_scrolling = true;
+bool use_gcmouse = false;  /* from compatdb, see setup_options */
+/* Where the input method window goes, in client coordinates of the focus
+   window, for a program that never places it; unset by default. */
+bool ime_fallback_position_set = false;
+int ime_fallback_x, ime_fallback_y;
 int gl_surface_mode = GL_SURFACE_IN_FRONT_OPAQUE;
 bool retina_enabled = false;
 bool enable_app_nap = false;
@@ -346,6 +351,34 @@ static void setup_options(void)
     if (!get_config_key(hkey, appkey, "UsePreciseScrolling", buffer, sizeof(buffer)))
         use_precise_scrolling = IS_OPTION_TRUE(buffer[0]);
 
+    /* GameController mice are off, as upstream, unless compatdb turns them
+       on: its built-in rule gcmouse does for every program, and a rule with
+       gcmouse=false, or dropping that rule (-1), keeps them off. */
+    use_gcmouse = ntdll_get_compat_gcmouse() > 0;
+    TRACE("GameController mice %s (compatdb gcmouse %d)\n", use_gcmouse ? "on" : "off",
+          ntdll_get_compat_gcmouse());
+
+    /* "x,y" */
+    if (!get_config_key(hkey, appkey, "IMEFallbackPosition", buffer, sizeof(buffer)))
+    {
+        WCHAR *end, *str = buffer;
+        int x = wcstol(str, &end, 10), y;
+
+        if (end != str && *end == ',')
+        {
+            str = end + 1;
+            y = wcstol(str, &end, 10);
+            if (end != str && !*end)
+            {
+                ime_fallback_position_set = true;
+                ime_fallback_x = x;
+                ime_fallback_y = y;
+            }
+        }
+        if (!ime_fallback_position_set)
+            WARN("IMEFallbackPosition %s is not \"x,y\", ignoring it\n", debugstr_w(buffer));
+    }
+
     if (!get_config_key(hkey, appkey, "OpenGLSurfaceMode", buffer, sizeof(buffer)))
     {
         static const WCHAR transparentW[] = {'t','r','a','n','s','p','a','r','e','n','t',0};
@@ -514,9 +547,12 @@ struct macdrv_thread_data *macdrv_init_thread_data(void)
     }
 
     macdrv_get_input_source_info(&data->keyboard_layout_uchr, &data->keyboard_type, &data->iso_keyboard, &input_source);
-    data->active_keyboard_layout = macdrv_get_hkl_from_source(input_source);
-    data->ime_open = macdrv_get_ime_open_status(input_source);
-    CFRelease(input_source);
+    if (input_source)
+    {
+        data->active_keyboard_layout = macdrv_get_hkl_from_source(input_source);
+        data->ime_open = macdrv_get_ime_open_status(input_source);
+        CFRelease(input_source);
+    }
     macdrv_compute_keyboard_layout(data);
 
     set_queue_display_fd(macdrv_get_event_queue_fd(data->queue));

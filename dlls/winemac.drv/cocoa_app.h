@@ -76,15 +76,23 @@ enum {
 
     NSMutableDictionary* originalDisplayModes;
     NSMutableDictionary* latentDisplayModes;
+    NSMutableDictionary* reportedLatentDisplayModes; /* guarded by @synchronized on itself */
     BOOL displaysCapturedForFullscreen;
 
     NSArray*    cursorFrames;
     int         cursorFrame;
+    CGFloat     cursorScale;
     NSTimer*    cursorTimer;
     NSCursor*   cursor;
+    NSArray*    builtCursorFrames;
+    int         builtCursorFrame;
+    CGFloat     builtCursorScale;
     BOOL        cursorIsCurrent;
     BOOL        cursorHidden;
     BOOL        clientWantsCursorHidden;
+    NSTimeInterval cursorReassertTime;
+    NSTimeInterval lastCursorReassertMoveTime;
+    BOOL        cursorReassertScheduled;
 
     NSTimeInterval lastSetCursorPositionTime;
 
@@ -115,7 +123,9 @@ enum {
     - (void) computeEventTimeAdjustmentFromTicks:(unsigned long long)tickcount uptime:(uint64_t)uptime_ns;
     - (double) ticksForEventTime:(NSTimeInterval)eventTime;
 
+    - (void) invalidateGotFocusEvents;
     - (void) windowGotFocus:(WineWindow*)window;
+    - (void) windowGotFocus:(WineWindow*)window requested:(BOOL)requested;
 
     - (BOOL) waitUntilQueryDone:(bool*)done timeout:(NSDate*)timeout processEvents:(BOOL)processEvents;
 
@@ -128,7 +138,11 @@ enum {
     - (NSPoint) flippedMouseLocation:(NSPoint)point;
 
     - (WineWindow*) frontWineWindow;
+    - (WineWindow*) rawMouseTargetWindow;
     - (void) adjustWindowLevels;
+    - (void) prepareToMiniaturize;
+    - (void) updateFullscreenPresentation:(BOOL)active;
+    - (void) updateCursorLocationAssistance;
     - (void) updateFullscreenWindows;
 
     - (BOOL) handleEvent:(NSEvent*)anEvent;
@@ -148,3 +162,5 @@ enum {
 
 
 void OnMainThreadAsync(dispatch_block_t block);
+
+void macdrv_start_gcmouse(void);

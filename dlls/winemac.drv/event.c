@@ -48,6 +48,7 @@ static const char *dbgstr_event(int type)
         "MOUSE_BUTTON",
         "MOUSE_MOVED_RELATIVE",
         "MOUSE_MOVED_ABSOLUTE",
+        "MOUSE_MOVED_RAW",
         "MOUSE_SCROLL",
         "QUERY_EVENT",
         "QUERY_EVENT_NO_PREEMPT_WAIT",
@@ -106,6 +107,9 @@ static macdrv_event_mask get_event_mask(DWORD mask)
         event_mask |= event_mask_for_type(MOUSE_MOVED_RELATIVE);
         event_mask |= event_mask_for_type(MOUSE_MOVED_ABSOLUTE);
     }
+
+    if (mask & (QS_MOUSEMOVE | QS_RAWINPUT))
+        event_mask |= event_mask_for_type(MOUSE_MOVED_RAW);
 
     if (mask & QS_POSTMESSAGE)
     {
@@ -356,6 +360,9 @@ void macdrv_handle_event(const macdrv_event *event)
     case MOUSE_MOVED_ABSOLUTE:
         macdrv_mouse_moved(hwnd, event);
         break;
+    case MOUSE_MOVED_RAW:
+        macdrv_mouse_moved_raw(hwnd, event);
+        break;
     case MOUSE_SCROLL:
         macdrv_mouse_scroll(hwnd, event);
         break;
@@ -457,6 +464,10 @@ BOOL macdrv_ProcessEvents(DWORD mask)
         macdrv_release_event(event);
     }
 
-    if (count) TRACE("processed %d events\n", count);
+    if (count)
+    {
+        TRACE("processed %d events\n", count);
+        macdrv_flush_raw_mouse_input();
+    }
     return mask == QS_ALLINPUT && !check_fd_events(macdrv_get_event_queue_fd(data->queue), POLLIN);
 }

@@ -27,8 +27,47 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(imm);
 
+/* Guards the composition rects of the Cocoa windows. */
 pthread_mutex_t ime_composition_rect_mutex = PTHREAD_MUTEX_INITIALIZER;
-CGRect ime_composition_rect;
+
+
+/***********************************************************************
+ *              update_ime_fallback_rect
+ *
+ * Give the window that has the focus a rect for the input method window in
+ * case the program never places it: the IMEFallbackPosition option, else
+ * the caret, else the bottom left corner of the client area, in the client
+ * coordinates win32u's SetIMECompositionRect maps.  The Cocoa window keeps
+ * it apart from the rect the program set and uses it only without one.
+ */
+static void update_ime_fallback_rect( struct macdrv_thread_data *thread_data )
+{
+    GUITHREADINFO info = { .cbSize = sizeof(info) };
+    HWND hwnd;
+    RECT rect;
+
+    if (!NtUserGetGUIThreadInfo( GetCurrentThreadId(), &info )) return;
+    if (!(hwnd = info.hwndFocus) && !(hwnd = info.hwndActive)) return;
+
+    if (ime_fallback_position_set)
+        SetRect( &rect, ime_fallback_x, ime_fallback_y, ime_fallback_x + 1, ime_fallback_y + 1 );
+    else if (info.hwndCaret)
+    {
+        hwnd = info.hwndCaret;
+        rect = info.rcCaret;
+    }
+    else
+    {
+        if (!NtUserGetClientRect( hwnd, &rect, 0 )) return;
+        SetRect( &rect, 0, rect.bottom - 1, 1, rect.bottom );
+    }
+
+    TRACE( "hwnd %p fallback rect %s\n", hwnd, wine_dbgstr_rect( &rect ) );
+
+    thread_data->ime_fallback_rect = true;
+    NtUserCallTwoParam( (ULONG_PTR)hwnd, (ULONG_PTR)&rect, NtUserCallTwoParam_SetIMECompositionRect );
+    thread_data->ime_fallback_rect = false;
+}
 
 
 /***********************************************************************
@@ -73,6 +112,8 @@ UINT macdrv_ImeToAsciiEx( UINT vkey, UINT vsc, const BYTE *state, void *update )
 
     TRACE( "flags %#x keyc %#x\n", flags, keyc );
 
+    update_ime_fallback_rect( thread_data );
+
     return macdrv_send_keydown_to_input_source( keyc, flags, repeat, update ) ? STATUS_SUCCESS : STATUS_NOT_IMPLEMENTED;
 }
 
@@ -82,11 +123,17 @@ UINT macdrv_ImeToAsciiEx( UINT vkey, UINT vsc, const BYTE *state, void *update )
  */
 BOOL macdrv_SetIMECompositionRect( HWND hwnd, RECT rect )
 {
-    TRACE( "hwnd %p, rect %s\n", hwnd, wine_dbgstr_rect( &rect ) );
+    struct macdrv_thread_data *thread_data = macdrv_thread_data();
+    bool fallback = thread_data && thread_data->ime_fallback_rect;
+    struct macdrv_win_data *data;
 
-    pthread_mutex_lock( &ime_composition_rect_mutex );
-    ime_composition_rect = cgrect_from_rect( rect );
-    pthread_mutex_unlock( &ime_composition_rect_mutex );
+    TRACE( "hwnd %p, rect %s%s\n", hwnd, wine_dbgstr_rect( &rect ), fallback ? " (fallback)" : "" );
+
+    /* The win data lock keeps the Cocoa window alive. */
+    if (!(data = get_win_data( hwnd ))) return TRUE;
+    if (data->cocoa_window)
+        macdrv_set_ime_composition_rect( data->cocoa_window, cgrect_from_rect( rect ), fallback );
+    release_win_data( data );
 
     return TRUE;
 }

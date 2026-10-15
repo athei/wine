@@ -232,7 +232,7 @@
  */
 WineStatusItem *macdrv_create_status_item(WineEventQueue *queue)
 {
-    __block WineStatusItem* statusItem;
+    __block WineStatusItem* statusItem = nil;
 
     OnMainThread(^{
         statusItem = [[WineStatusItem alloc] initWithEventQueue:queue];

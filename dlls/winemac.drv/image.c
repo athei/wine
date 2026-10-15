@@ -250,25 +250,36 @@ CFArrayRef create_app_icon_images(void)
     struct dispatch_callback_params params = {.callback = app_icon_callback};
     CFMutableArrayRef images = NULL;
     struct app_icon_entry *entries;
+    void *ret_ptr;
     ULONG ret_len;
     unsigned count;
     int i;
 
     TRACE("()\n");
 
-    if (KeUserDispatchCallback(&params, sizeof(params), (void**)&entries, &ret_len) ||
+    if (KeUserDispatchCallback(&params, sizeof(params), &ret_ptr, &ret_len) ||
         (ret_len % sizeof(*entries)))
     {
         WARN("incorrect callback result\n");
         return NULL;
     }
     count = ret_len / sizeof(*entries);
-    if (!count || !entries) return NULL;
+    if (!count || !ret_ptr) return NULL;
+
+    /* ret_ptr is on the stack of the finished callback, which the next
+       user-mode callback reuses.  NtUserDestroyCursor() can make one. */
+    if (!(entries = malloc(ret_len)))
+    {
+        WARN("failed to allocate icon entries\n");
+        return NULL;
+    }
+    memcpy(entries, ret_ptr, ret_len);
 
     images = CFArrayCreateMutable(NULL, count, &kCFTypeArrayCallBacks);
     if (!images)
     {
         WARN("failed to create images array\n");
+        free(entries);
         return NULL;
     }
 
@@ -286,6 +297,8 @@ CFArrayRef create_app_icon_images(void)
             CGImageRelease(cgimage);
         }
     }
+
+    free(entries);
 
     if (images && !CFArrayGetCount(images))
     {
