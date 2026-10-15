@@ -63,6 +63,7 @@
 #include "request.h"
 #include "user.h"
 #include "security.h"
+#include "msync.h"
 
 /* process object */
 
@@ -549,6 +550,8 @@ void shutdown_master_socket(void)
 static void process_died( struct process *process )
 {
     if (debug_level) fprintf( stderr, "%04x: *process killed*\n", process->id );
+    /* only now can no thread of it touch its msync objects any more */
+    msync_process_exited( process->id );
     if (!process->is_system)
     {
         if (!--user_processes && !shutdown_stage && master_socket_timeout != TIMEOUT_INFINITE)
