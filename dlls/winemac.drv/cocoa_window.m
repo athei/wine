@@ -210,7 +210,7 @@ static inline BOOL stage_manager_enabled(void)
 @end
 
 
-@interface WineBaseView : NSView
+@interface WineBaseView : NSView <NSViewLayerContentScaleDelegate>
 @end
 
 
@@ -224,11 +224,13 @@ static inline BOOL stage_manager_enabled(void)
 @end
 
 
-@interface WineContentView : WineBaseView <NSTextInputClient, NSViewLayerContentScaleDelegate>
+@interface WineContentView : WineBaseView <NSTextInputClient>
 {
     CGRect surfaceRect;
     CGImageRef colorImage;
     CGImageRef shapeImage;
+    BOOL shapeImageCoversView;
+    CALayer* offsetImageLayer;
 
     NSMutableArray* glContexts;
     NSMutableArray* pendingGlContexts;
@@ -260,6 +262,7 @@ static inline BOOL stage_manager_enabled(void)
 
     - (void) addGLContext:(WineOpenGLContext*)context;
     - (void) removeGLContext:(WineOpenGLContext*)context;
+    - (NSArray*) copyGLContexts;
     - (void) updateGLContexts;
 
     - (void) wine_getBackingSize:(int*)outBackingSize;
@@ -301,6 +304,9 @@ static inline BOOL stage_manager_enabled(void)
 @property (retain, nonatomic) CAShapeLayer* contentViewMaskLayer;
 
     - (void) setShape:(CGPathRef)newShape;
+    - (BOOL) isShaped;
+    - (void) shapeChangedFrom:(BOOL)wasShaped;
+    - (void) setShapePending:(BOOL)pending;
 
     - (void) updateForGLSubviews;
 
@@ -350,9 +356,37 @@ static inline BOOL stage_manager_enabled(void)
         return NO;
     }
 
+    - (void) mouseDown:(NSEvent*)event
+    {
+        /* WineApplication already delivered this click to the Windows client.
+           NSView's default forwards it to NSThemeFrame, which starts a window
+           drag and selects the arrow cursor. */
+    }
+
     - (NSFocusRingType) focusRingType
     {
         return NSFocusRingTypeNone;
+    }
+
+    /* Also for WineMetalView, whose CAMetalLayer gives EGL and Vulkan surfaces
+     * their size: with a scale of 2 in non-retina mode they would be twice the
+     * size of the client area. */
+    - (BOOL) layer:(CALayer*)layer shouldInheritContentsScale:(CGFloat)newScale fromWindow:(NSWindow*)window
+    {
+        /* This method is invoked when the contentsScale of the layer is not
+         * equal to the contentsScale of the window.
+         * (Initially when the layer is first created, and later if the window
+         * contentsScale changes, i.e. moved between retina/non-retina monitors).
+         *
+         * We usually want to return YES, so the "moving windows between
+         * retina/non-retina monitors" case works right.
+         * But return NO when we need an intentional mismatch between the
+         * window and layer contentsScale
+         * (non-retina mode with a retina monitor, and vice-versa).
+         */
+        if (layer.contentsScale != window.backingScaleFactor)
+            return NO;
+        return YES;
     }
 
 @end
@@ -381,6 +415,7 @@ static inline BOOL stage_manager_enabled(void)
         [glContexts release];
         [pendingGlContexts release];
         [_caLayerHosts release];
+        [offsetImageLayer release];
         CGImageRelease(colorImage);
         CGImageRelease(shapeImage);
         [super dealloc];
@@ -409,7 +444,7 @@ static inline BOOL stage_manager_enabled(void)
         if (window.closing)
             return;
 
-        imageRect = layer.bounds;
+        imageRect = CGRectOffset(layer.bounds, -surfaceRect.origin.x, -surfaceRect.origin.y);
         imageRect.origin.x *= layer.contentsScale;
         imageRect.origin.y *= layer.contentsScale;
         imageRect.size.width *= layer.contentsScale;
@@ -422,8 +457,44 @@ static inline BOOL stage_manager_enabled(void)
 
         if (image)
         {
-            layer.position = surfaceRect.origin;
-            layer.contents = (id)image;
+            if (CGPointEqualToPoint(surfaceRect.origin, CGPointZero))
+            {
+                [offsetImageLayer removeFromSuperlayer];
+                [offsetImageLayer release];
+                offsetImageLayer = nil;
+                layer.contents = (id)image;
+            }
+            else
+            {
+                /* The image starts inside the view, as for a full-screen
+                   window that keeps its aspect ratio.  Moving this layer would
+                   move the client views and the window's black bars with it,
+                   so the image goes into a sublayer below them. */
+                CGSize size = CGSizeMake(CGImageGetWidth(image) / layer.contentsScale,
+                                         CGImageGetHeight(image) / layer.contentsScale);
+                CGPoint origin = surfaceRect.origin;
+
+                if (!layer.geometryFlipped)
+                    origin.y = NSHeight(layer.bounds) - origin.y - size.height;
+
+                [CATransaction begin];
+                [CATransaction setDisableActions:YES];
+                if (!offsetImageLayer)
+                {
+                    offsetImageLayer = [[CALayer alloc] init];
+                    offsetImageLayer.anchorPoint = CGPointZero;
+                    offsetImageLayer.zPosition = -1;
+                    [layer insertSublayer:offsetImageLayer atIndex:0];
+                }
+                offsetImageLayer.contentsScale = layer.contentsScale;
+                offsetImageLayer.minificationFilter = layer.minificationFilter;
+                offsetImageLayer.magnificationFilter = layer.magnificationFilter;
+                offsetImageLayer.frame = CGRectMake(origin.x, origin.y, size.width, size.height);
+                offsetImageLayer.contents = (id)image;
+                layer.contents = nil;
+                [CATransaction commit];
+            }
+            layer.position = CGPointZero;
             CFRelease(image);
             [window windowDidDrawContent];
 
@@ -458,6 +529,19 @@ static inline BOOL stage_manager_enabled(void)
     - (BOOL) hasShapeImage
     {
         return !!shapeImage;
+    }
+
+    - (void) setShapeImageCoversView:(BOOL)covers
+    {
+        shapeImageCoversView = covers;
+    }
+
+    /* A shape image that leaves no part of the view out, as for a window
+       region equal to the window or a color key that no pixel matches, does
+       not shape the window. */
+    - (BOOL) hasPartialShapeImage
+    {
+        return shapeImage && !shapeImageCoversView;
     }
 
     - (void) viewWillDraw
@@ -503,6 +587,16 @@ static inline BOOL stage_manager_enabled(void)
         [glContexts removeObjectIdenticalTo:context];
         [pendingGlContexts removeObjectIdenticalTo:context];
         [(WineWindow*)[self window] updateForGLSubviews];
+    }
+
+    - (NSArray*) copyGLContexts
+    {
+        NSMutableArray* contexts = [[NSMutableArray alloc] init];
+        if (glContexts)
+            [contexts addObjectsFromArray:glContexts];
+        if (pendingGlContexts)
+            [contexts addObjectsFromArray:pendingGlContexts];
+        return contexts;
     }
 
     - (void) updateGLContexts:(BOOL)reattach
@@ -643,24 +737,6 @@ static inline BOOL stage_manager_enabled(void)
             host.contentsScale = mode ? 2.0 : 1.0;
 
         [super setRetinaMode:mode];
-    }
-
-    - (BOOL) layer:(CALayer*)layer shouldInheritContentsScale:(CGFloat)newScale fromWindow:(NSWindow*)window
-    {
-        /* This method is invoked when the contentsScale of the layer is not
-         * equal to the contentsScale of the window.
-         * (Initially when the layer is first created, and later if the window
-         * contentsScale changes, i.e. moved between retina/non-retina monitors).
-         *
-         * We usually want to return YES, so the "moving windows between
-         * retina/non-retina monitors" case works right.
-         * But return NO when we need an intentional mismatch between the
-         * window and layer contentsScale
-         * (non-retina mode with a retina monitor, and vice-versa).
-         */
-        if (layer.contentsScale != window.backingScaleFactor)
-            return NO;
-        return YES;
     }
 
     - (void) viewDidHide
@@ -837,13 +913,15 @@ static inline BOOL stage_manager_enabled(void)
 
     - (NSRect) firstRectForCharacterRange:(NSRange)aRange actualRange:(NSRangePointer)actualRange
     {
+        WineWindow* window = (WineWindow*)[self window];
+        CGRect rect = CGRectZero;
         NSRect ret;
 
         aRange = NSIntersectionRange(aRange, NSMakeRange(0, [markedText length]));
 
-        pthread_mutex_lock(&ime_composition_rect_mutex);
-        ret = NSRectFromCGRect(cgrect_mac_from_win(ime_composition_rect));
-        pthread_mutex_unlock(&ime_composition_rect_mutex);
+        if ([window isKindOfClass:[WineWindow class]])
+            [window getImeCompositionRect:&rect];
+        ret = NSRectFromCGRect(cgrect_mac_from_win(rect));
 
         [[WineApplicationController sharedController] flipRect:&ret];
 
@@ -1006,6 +1084,10 @@ static inline BOOL stage_manager_enabled(void)
            borderless windows and between NSWindow and NSPanel. */
         [window setHidesOnDeactivate:NO];
         [window setReleasedWhenClosed:NO];
+        /* Each animated order-in or close leaves a GCD worker thread waiting
+           in -[NSAnimation _runBlocking] permanently (macOS 27).  Enough of
+           them starve the dispatch work that Apple's OpenGL waits for. */
+        [window setAnimationBehavior:NSWindowAnimationBehaviorNone];
 
         [window disableCursorRects];
         [window setShowsResizeIndicator:NO];
@@ -1217,22 +1299,15 @@ static inline BOOL stage_manager_enabled(void)
         else
             level = NSNormalWindowLevel;
 
-        if (active)
+        /* A window covering a screen keeps its level: raised above the menu
+           bar, it breaks Mission Control on macOS 27.  The controller hides
+           the Dock and menu bar instead, as native games do. */
+        if (active && (fullscreen || [self screen]) &&
+            [[WineApplicationController sharedController] areDisplaysCaptured])
         {
-            BOOL captured;
-
-            captured = (fullscreen || [self screen]) && [[WineApplicationController sharedController] areDisplaysCaptured];
-
-            if (captured || fullscreen)
-            {
-                if (captured)
-                    level = CGShieldingWindowLevel() + 1; /* Need +1 or we don't get mouse moves */
-                else
-                    level = NSStatusWindowLevel + 1;
-
-                if (self.floating)
-                    level++;
-            }
+            level = CGShieldingWindowLevel() + 1; /* Need +1 or we don't get mouse moves */
+            if (self.floating)
+                level++;
         }
 
         return level;
@@ -1319,14 +1394,12 @@ static inline BOOL stage_manager_enabled(void)
                          */
                         if (stage_manager_enabled())
                         {
-                            [self setStyleMask:([self styleMask] | NSWindowStyleMaskMiniaturizable)];
-                            [super miniaturize:nil];
+                            [self miniaturizeForWin32];
                         }
                     }
                     else
                     {
-                        [self setStyleMask:([self styleMask] | NSWindowStyleMaskMiniaturizable)];
-                        [super miniaturize:nil];
+                        [self miniaturizeForWin32];
                         discard |= event_mask_for_type(WINDOW_BROUGHT_FORWARD) |
                                    event_mask_for_type(WINDOW_GOT_FOCUS) |
                                    event_mask_for_type(WINDOW_LOST_FOCUS);
@@ -1351,7 +1424,7 @@ static inline BOOL stage_manager_enabled(void)
             maximized = state->maximized;
             [self adjustFeaturesForState];
 
-            if (!maximized && [self inLiveResize])
+            if (!maximized && [self inLiveResize] && !liveResizeForScreen)
                 [self sendResizeStartQuery];
         }
 
@@ -1702,6 +1775,7 @@ static inline BOOL stage_manager_enabled(void)
             BOOL wasVisible;
             WineWindow* parent;
             WineWindow* child;
+            WineWindow* other;
 
             [controller transformProcessToForeground:!self.preventsAppActivation];
             if ([NSApp isHidden])
@@ -1716,9 +1790,11 @@ static inline BOOL stage_manager_enabled(void)
             if ([self becameEligibleParentOrChild])
                 needAdjustWindowLevels = TRUE;
 
-            if (prev || next)
+            /* prev may have been ordered out since this request was queued,
+               which leaves nothing to order relative to when next is nil. */
+            other = [prev isVisible] ? prev : next;
+            if (other)
             {
-                WineWindow* other = [prev isVisible] ? prev : next;
                 NSWindowOrderingMode orderingMode = [prev isVisible] ? NSWindowBelow : NSWindowAbove;
 
                 if (![self isOrdered:orderingMode relativeTo:other])
@@ -1793,8 +1869,7 @@ static inline BOOL stage_manager_enabled(void)
 
             if (pendingMinimize)
             {
-                [self setStyleMask:([self styleMask] | NSWindowStyleMaskMiniaturizable)];
-                [super miniaturize:nil];
+                [self miniaturizeForWin32];
                 pendingMinimize = FALSE;
             }
 
@@ -1866,6 +1941,40 @@ static inline BOOL stage_manager_enabled(void)
                                          event_mask_for_type(WINDOW_MINIMIZE_REQUESTED) |
                                          event_mask_for_type(WINDOW_RESTORE_REQUESTED)
                                forWindow:self];
+    }
+
+    /* shapePending: Windows has a region for the window, but no flush has
+       brought its shape image yet. */
+    - (BOOL) isShaped
+    {
+        WineContentView *view = self.contentView;
+        return view.layer.mask || shapePending || [view hasPartialShapeImage];
+    }
+
+    - (void) shapeChangedFrom:(BOOL)wasShaped
+    {
+        [self checkTransparency];
+        if ([self isShaped] != wasShaped)
+            [[WineApplicationController sharedController] updateFullscreenPresentation:[NSApp isActive]];
+    }
+
+    - (void) setShapePending:(BOOL)pending
+    {
+        BOOL wasShaped = [self isShaped];
+
+        shapePending = pending;
+        [self shapeChangedFrom:wasShaped];
+    }
+
+    /* A window region can leave most of a screen-covering window empty, as it
+       does for the background window of InstallShield setups, so a shaped
+       window does not hide the Dock and menu bar. */
+    - (BOOL) coversMenuBarScreen
+    {
+        NSScreen* screen = [[NSScreen screens] firstObject];
+        NSRect contentRect = [self contentRectForFrameRect:self.wine_fractionalFrame];
+
+        return screen && fullscreen && ![self isShaped] && screen_covered_by_rect(contentRect, @[screen]);
     }
 
     - (void) updateFullscreen
@@ -2020,7 +2129,7 @@ static inline BOOL stage_manager_enabled(void)
     - (BOOL) needsTransparency
     {
         WineContentView *view = self.contentView;
-        return self.contentView.layer.mask || [view hasShapeImage] || self.usePerPixelAlpha ||
+        return [self isShaped] || self.usePerPixelAlpha ||
                 (gl_surface_mode == GL_SURFACE_BEHIND && [view hasGLDescendant]);
     }
 
@@ -2046,6 +2155,7 @@ static inline BOOL stage_manager_enabled(void)
     {
         CALayer* layer = [[self contentView] layer];
         CAShapeLayer* mask = (CAShapeLayer*)layer.mask;
+        BOOL wasShaped = [self isShaped];
         if (CGPathEqualToPath(newShape, mask.path)) return;
 
         if (newShape && !layer.mask)
@@ -2063,6 +2173,7 @@ static inline BOOL stage_manager_enabled(void)
 
         [self checkTransparency];
         [self checkEmptyShaped];
+        [self shapeChangedFrom:wasShaped];
     }
 
     - (void) makeFocused:(BOOL)activate
@@ -2078,8 +2189,9 @@ static inline BOOL stage_manager_enabled(void)
         [self makeKeyWindow];
         causing_becomeKeyWindow = nil;
 
-        [queue discardEventsMatchingMask:event_mask_for_type(WINDOW_GOT_FOCUS) |
-                                         event_mask_for_type(WINDOW_LOST_FOCUS)
+        /* Keep WINDOW_GOT_FOCUS, so Windows follows the key window even
+           when its foreground window changed while this was in flight. */
+        [queue discardEventsMatchingMask:event_mask_for_type(WINDOW_LOST_FOCUS)
                                forWindow:self];
     }
 
@@ -2350,11 +2462,26 @@ static inline BOOL stage_manager_enabled(void)
 
     - (NSRect) constrainFrameRect:(NSRect)frameRect toScreen:(NSScreen *)screen
     {
+        NSArray* screens;
+        NSRect contentRect;
+
+        // Windows does not keep windows clear of the menu bar, and a window
+        // that AppKit moves below it a moment after Wine placed it, such as
+        // a titled window at the top of the screen, or a window that turns
+        // titled there when a program leaves full screen, would get Windows
+        // coordinates the program did not set.  So AppKit only constrains
+        // the frames of a live resize: one by the user, or the one in which
+        // macOS 27 adjusts windows to a display change, after which
+        // -_displayChanged has Wine put the window back where Windows has
+        // it.  Every other frame is Wine's or follows from it.
+        if (![self inLiveResize])
+            return frameRect;
+
         // If a window is sized to completely cover a screen, then it's in
         // full-screen mode.  In that case, we don't allow NSWindow to constrain
         // it.
-        NSArray* screens = [NSScreen screens];
-        NSRect contentRect = [self contentRectForFrameRect:frameRect];
+        screens = [NSScreen screens];
+        contentRect = [self contentRectForFrameRect:frameRect];
         if (!screen_covered_by_rect(contentRect, screens) &&
             frame_intersects_screens(frameRect, screens))
             frameRect = [super constrainFrameRect:frameRect toScreen:screen];
@@ -2384,13 +2511,26 @@ static inline BOOL stage_manager_enabled(void)
     // working.  The only real danger would be if Apple changed the return type
     // to a struct or floating-point type, which would change the calling
     // convention.
+    //
+    // On macOS 27, Cocoa wraps that adjustment in a live resize.  It is not
+    // a resize by the user, so it must not be reported to Windows as one:
+    // see windowWillStartLiveResize:.
     - (id) _displayChanged
     {
         macdrv_event* event = macdrv_create_event(REASSERT_WINDOW_POSITION, self);
+
         [queue postEvent:event];
         macdrv_release_event(event);
 
-        return [super _displayChanged];
+        adjustingToScreen = TRUE;
+        @try
+        {
+            return [super _displayChanged];
+        }
+        @finally
+        {
+            adjustingToScreen = FALSE;
+        }
     }
 
     - (BOOL) isExcludedFromWindowsMenu
@@ -2520,6 +2660,14 @@ static inline BOOL stage_manager_enabled(void)
         }
     }
 
+    /* Carry out a minimize that Windows asked for. */
+    - (void) miniaturizeForWin32
+    {
+        [[WineApplicationController sharedController] prepareToMiniaturize];
+        [self setStyleMask:([self styleMask] | NSWindowStyleMaskMiniaturizable)];
+        [super miniaturize:nil];
+    }
+
     - (void) miniaturize:(id)sender
     {
         /* When Stage Manager is enabled, miniaturize: just moves the app/window to
@@ -2573,6 +2721,41 @@ static inline BOOL stage_manager_enabled(void)
             [self checkTransparency];
     }
 
+    /* Called on Wine threads. */
+    - (void) setImeCompositionRect:(CGRect)rect fallback:(BOOL)fallback
+    {
+        pthread_mutex_lock(&ime_composition_rect_mutex);
+        if (fallback)
+        {
+            imeFallbackRect = rect;
+            imeFallbackRectSet = TRUE;
+        }
+        else
+        {
+            imeCompositionRect = rect;
+            imeCompositionRectSet = TRUE;
+        }
+        pthread_mutex_unlock(&ime_composition_rect_mutex);
+    }
+
+    /* The rect the program set for the input method window, else the
+       fallback; FALSE when there is neither. */
+    - (BOOL) getImeCompositionRect:(CGRect*)rect
+    {
+        BOOL ret = TRUE;
+
+        pthread_mutex_lock(&ime_composition_rect_mutex);
+        if (imeCompositionRectSet)
+            *rect = imeCompositionRect;
+        else if (imeFallbackRectSet)
+            *rect = imeFallbackRect;
+        else
+            ret = FALSE;
+        pthread_mutex_unlock(&ime_composition_rect_mutex);
+
+        return ret;
+    }
+
     - (void) setRetinaMode:(BOOL)mode
     {
         NSRect frame;
@@ -2613,6 +2796,16 @@ static inline BOOL stage_manager_enabled(void)
         ignore_windowResize = TRUE;
         [self setFrameAndWineFrame:frame];
         ignore_windowResize = FALSE;
+
+        if (self.contentViewMaskLayer)
+        {
+            CGRect rect = contentViewMaskRect;
+            rect.origin.x *= scale;
+            rect.origin.y *= scale;
+            rect.size.width *= scale;
+            rect.size.height *= scale;
+            [self setMask:rect];
+        }
     }
 
     - (void) setMask:(CGRect)rect
@@ -2626,34 +2819,27 @@ static inline BOOL stage_manager_enabled(void)
             self.contentViewMaskLayer = nil;
         }
 
+        contentViewMaskRect = rect;
         if (CGRectIsEmpty(rect))
             return;
 
         CAShapeLayer *shapeLayer = [CAShapeLayer layer];
+        /* above the client views, wherever they are inserted */
+        shapeLayer.zPosition = 1;
         shapeLayer.bounds = self.contentView.layer.bounds;
         shapeLayer.position = self.contentView.layer.position;
         shapeLayer.geometryFlipped = self.contentView.layer.geometryFlipped;
         shapeLayer.anchorPoint = self.contentView.layer.anchorPoint;
         shapeLayer.fillColor = CGColorGetConstantColor(kCGColorBlack);
+        shapeLayer.fillRule = kCAFillRuleEvenOdd;
 
+        /* Cover everything around 'rect', not only the bounds the content view
+           has now, so that the bars still reach its edges if it grows before
+           the next mask. */
         CGMutablePathRef path = CGPathCreateMutable();
-        /* left/right */
-        if (rect.origin.x > 0.0)
-            CGPathAddRect(path, NULL, CGRectMake(0, 0, rect.origin.x, shapeLayer.bounds.size.height));
-        if (rect.origin.x + rect.size.width < shapeLayer.bounds.size.width)
-            CGPathAddRect(path, NULL, CGRectMake(rect.origin.x + rect.size.width,
-                                                 0,
-                                                 shapeLayer.bounds.size.width - (rect.origin.x + rect.size.width),
-                                                 shapeLayer.bounds.size.height));
-
-        /* top/bottom */
-        if (rect.origin.y > 0.0)
-            CGPathAddRect(path, NULL, CGRectMake(0, 0, shapeLayer.bounds.size.width, rect.origin.y));
-        if (rect.origin.y + rect.size.height < shapeLayer.bounds.size.height)
-            CGPathAddRect(path, NULL, CGRectMake(0,
-                                                 rect.origin.y + rect.size.height,
-                                                 shapeLayer.bounds.size.width,
-                                                 shapeLayer.bounds.size.height - (rect.origin.y + rect.size.height)));
+        CGPathAddRect(path, NULL, CGRectInset(CGRectUnion(shapeLayer.bounds, rect),
+                                              -NSWidth(shapeLayer.bounds), -NSHeight(shapeLayer.bounds)));
+        CGPathAddRect(path, NULL, rect);
 
         shapeLayer.path = path;
         CGPathRelease(path);
@@ -2785,8 +2971,6 @@ static inline BOOL stage_manager_enabled(void)
         if (event)
             [self flagsChanged:event];
 
-        if (causing_becomeKeyWindow == self) return;
-
         [controller windowGotFocus:self];
     }
 
@@ -2820,6 +3004,12 @@ static inline BOOL stage_manager_enabled(void)
 
     - (void) windowDidEndLiveResize:(NSNotification *)notification
     {
+        if (liveResizeForScreen)
+        {
+            liveResizeForScreen = FALSE;
+            return;
+        }
+
         if (!maximized)
         {
             macdrv_event* event = macdrv_create_event(WINDOW_RESIZE_ENDED, self);
@@ -2892,8 +3082,9 @@ static inline BOOL stage_manager_enabled(void)
     - (void)windowDidResize:(NSNotification *)notification skipSizeMove:(BOOL)skipSizeMove
     {
         NSRect frame = self.wine_fractionalFrame;
+        BOOL resizing = [self inLiveResize] && !liveResizeForScreen;
 
-        if ([self inLiveResize])
+        if (resizing)
         {
             if (NSMinX(frame) != NSMinX(frameAtResizeStart))
                 resizingFromLeft = TRUE;
@@ -2912,7 +3103,7 @@ static inline BOOL stage_manager_enabled(void)
 
         [self postWindowFrameChanged:frame
                           fullscreen:([self styleMask] & NSWindowStyleMaskFullScreen) != 0
-                            resizing:[self inLiveResize]
+                            resizing:resizing
                         skipSizeMove:skipSizeMove];
 
         [[[self contentView] inputContext] invalidateCharacterCoordinates];
@@ -2991,7 +3182,7 @@ static inline BOOL stage_manager_enabled(void)
 
     - (NSSize) windowWillResize:(NSWindow*)sender toSize:(NSSize)frameSize
     {
-        if ([self inLiveResize])
+        if ([self inLiveResize] && !liveResizeForScreen)
         {
             if (maximized)
                 return self.wine_fractionalFrame.size;
@@ -3030,6 +3221,14 @@ static inline BOOL stage_manager_enabled(void)
 
     - (void) windowWillStartLiveResize:(NSNotification *)notification
     {
+        /* Cocoa moving the window onto a changed screen: the frame change is
+           reported like any other, without a resize start query.  That query
+           would also wait for the window's thread, which may be the one
+           changing the display mode and waiting for this thread. */
+        liveResizeForScreen = adjustingToScreen;
+        if (liveResizeForScreen)
+            return;
+
         [self endWindowDragging];
 
         if (maximized)
@@ -3204,7 +3403,7 @@ static inline BOOL stage_manager_enabled(void)
 WineWindow *macdrv_create_cocoa_window(const struct macdrv_window_features* wf,
         CGRect frame, void* hwnd, WineEventQueue *queue)
 {
-    __block WineWindow* window;
+    __block WineWindow* window = nil;
 
     OnMainThread(^{
         window = [[WineWindow createWindowWithFeatures:wf
@@ -3231,7 +3430,14 @@ void macdrv_destroy_cocoa_window(WineWindow *window)
         [window close];
     });
     [window.queue discardEventsMatchingMask:-1 forWindow:window];
-    [window release];
+
+    /* The window's views may only be destroyed on the main thread, and
+       the window's dealloc destroys its frame view, so the release that
+       can be the last one is handed to the main thread. The request that
+       closed the window is already done, so this is ordered after it. */
+    OnMainThreadAsync(^{
+        [window release];
+    });
 }
 }
 
@@ -3344,17 +3550,23 @@ void macdrv_set_cocoa_window_frame(WineWindow *window, const CGRect* new_frame)
 /***********************************************************************
  *              macdrv_get_cocoa_window_frame
  *
- * Gets the frame of a Cocoa window.
+ * Gets the frame of a Cocoa window.  Returns zero on failure, non-zero
+ * on success.
  */
-void macdrv_get_cocoa_window_frame(WineWindow *window, CGRect* out_frame)
+int macdrv_get_cocoa_window_frame(WineWindow *window, CGRect* out_frame)
 {
+    __block int ret = FALSE;
+
     OnMainThread(^{
         NSRect frame;
 
         frame = [window contentRectForFrameRect:[window wine_fractionalFrame]];
         [[WineApplicationController sharedController] flipRect:&frame];
         *out_frame = cgrect_win_from_mac(NSRectToCGRect(frame));
+        ret = TRUE;
     });
+
+    return ret;
 }
 
 /***********************************************************************
@@ -3399,7 +3611,7 @@ void macdrv_window_set_color_image(WineWindow *window, CGImageRef image, CGRect 
 /***********************************************************************
  *              macdrv_window_set_shape_image
  */
-void macdrv_window_set_shape_image(WineWindow *window, CGImageRef image)
+void macdrv_window_set_shape_image(WineWindow *window, CGImageRef image, bool covers_view)
 {
 @autoreleasepool
 {
@@ -3407,12 +3619,32 @@ void macdrv_window_set_shape_image(WineWindow *window, CGImageRef image)
 
     OnMainThreadAsync(^{
         WineContentView *view = [window contentView];
+        BOOL wasShaped = [window isShaped];
 
         [view setShapeImage:image];
+        [view setShapeImageCoversView:covers_view];
         [view setNeedsDisplay:true];
-        [window checkTransparency];
+        [window setShapePending:NO];
+        [window shapeChangedFrom:wasShaped];
 
         CGImageRelease(image);
+    });
+}
+}
+
+/***********************************************************************
+ *              macdrv_window_set_shape_pending
+ *
+ * The window has a region whose shape image the next flush brings.  Until
+ * then it counts as shaped, so showing it does not hide the Dock and menu
+ * bar only for the shape image to show them again.
+ */
+void macdrv_window_set_shape_pending(WineWindow *window, bool pending)
+{
+@autoreleasepool
+{
+    OnMainThreadAsync(^{
+        [window setShapePending:pending];
     });
 }
 }
@@ -3483,7 +3715,7 @@ void macdrv_set_window_mask(WineWindow *window, CGRect rect)
 @autoreleasepool
 {
     OnMainThread(^{
-        [window setMask:rect];
+        [window setMask:cgrect_mac_from_win(rect)];
     });
 }
 }
@@ -3525,7 +3757,7 @@ WineContentView *macdrv_create_view(CGRect rect)
 {
 @autoreleasepool
 {
-    __block WineContentView* view;
+    __block WineContentView* view = nil;
 
     if (CGRectIsNull(rect)) rect = CGRectZero;
 
@@ -3703,6 +3935,17 @@ void macdrv_remove_view_opengl_context(WineContentView *view, WineOpenGLContext 
 }
 }
 
+/***********************************************************************
+ *              macdrv_copy_view_opengl_contexts
+ *
+ * Returns a new array of the OpenGL contexts tracked for a view.  Must be
+ * called on the main thread.  The caller releases the array.
+ */
+CFArrayRef macdrv_copy_view_opengl_contexts(WineContentView *view)
+{
+    return (CFArrayRef)[view copyGLContexts];
+}
+
 id<MTLDevice> macdrv_create_metal_device(void)
 {
 @autoreleasepool
@@ -3721,7 +3964,7 @@ void macdrv_release_metal_device(id<MTLDevice> device)
 
 WineMetalView *macdrv_view_create_metal_view(WineContentView *view, id<MTLDevice> device)
 {
-    __block WineMetalView *metalView;
+    __block WineMetalView *metalView = nil;
 
     OnMainThread(^{
         metalView = [view newMetalViewWithDevice:device];
@@ -3732,7 +3975,7 @@ WineMetalView *macdrv_view_create_metal_view(WineContentView *view, id<MTLDevice
 
 CAMetalLayer *macdrv_view_get_metal_layer(WineMetalView *view)
 {
-    __block CAMetalLayer* layer;
+    __block CAMetalLayer* layer = nil;
 
     OnMainThread(^{
         layer = (CAMetalLayer*)view.layer;
@@ -4042,7 +4285,7 @@ uint32_t macdrv_window_background_color(void)
  */
 bool macdrv_send_keydown_to_input_source(int keyc, unsigned int flags, int repeat, void *update)
 {
-    __block bool ret;
+    __block bool ret = false;
 
     OnMainThread(^{
         WineWindow* window = (WineWindow*)[NSApp keyWindow];
@@ -4095,4 +4338,16 @@ void macdrv_clear_ime_text(void)
         if (window)
             [[window contentView] clearMarkedText];
     });
+}
+
+/***********************************************************************
+ *              macdrv_set_ime_composition_rect
+ *
+ * Store where the input method window of a window goes, in Win32 screen
+ * coordinates.  A fallback rect is only used while the program has set
+ * none for the window.
+ */
+void macdrv_set_ime_composition_rect(WineWindow *window, CGRect rect, bool fallback)
+{
+    [window setImeCompositionRect:rect fallback:fallback];
 }

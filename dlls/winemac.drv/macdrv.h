@@ -150,6 +150,7 @@ struct macdrv_thread_data
     UInt32                      dead_key_state;
     HKL                         active_keyboard_layout;
     bool                        ime_open;
+    bool                        ime_fallback_rect;  /* SetIMECompositionRect gets the fallback rect */
     WORD                        keyc2vkey[128];
     WORD                        keyc2scan[128];
 };
@@ -223,7 +224,6 @@ extern void macdrv_ThreadDetach(void);
 
 /* ime.c */
 extern pthread_mutex_t ime_composition_rect_mutex;
-extern CGRect ime_composition_rect;
 extern void macdrv_ime_set_text(HWND hwnd, CFStringRef text, bool complete,
                                 unsigned int cursor_begin, unsigned int cursor_end, void *update);
 
@@ -237,6 +237,7 @@ struct macdrv_win_data
     HANDLE              drag_event;             /* event to signal that Cocoa-driven window dragging has ended */
     unsigned int        on_screen : 1;          /* is window ordered in? (minimized or not) */
     unsigned int        shaped : 1;             /* is window using a custom region shape? */
+    unsigned int        shape_pending : 1;      /* has the Cocoa window been told of a region that no flush has brought yet? */
     unsigned int        layered : 1;            /* is window layered and with valid attributes? */
     unsigned int        ulw_layered : 1;        /* has UpdateLayeredWindow() been called for window? */
     unsigned int        per_pixel_alpha : 1;    /* is window using per-pixel alpha? */
@@ -259,6 +260,8 @@ extern bool macdrv_client_surface_acquire_metal_swapchain(struct macdrv_client_s
 
 extern struct macdrv_win_data *get_win_data(HWND hwnd);
 extern void release_win_data(struct macdrv_win_data *data);
+extern bool get_fullscreen_content_rect(const struct window_rects *rects, RECT *rect);
+extern void set_shape_pending(struct macdrv_win_data *data, bool pending);
 extern bool is_d3dmetal_client_view_presenting(struct macdrv_win_data *data);
 extern void init_win_context(void);
 extern WineWindow *macdrv_get_cocoa_window(HWND hwnd, bool require_on_screen);
@@ -291,6 +294,8 @@ extern bool query_min_max_info(HWND hwnd);
 
 extern void macdrv_mouse_button(HWND hwnd, const macdrv_event *event);
 extern void macdrv_mouse_moved(HWND hwnd, const macdrv_event *event);
+extern void macdrv_mouse_moved_raw(HWND hwnd, const macdrv_event *event);
+extern void macdrv_flush_raw_mouse_input(void);
 extern void macdrv_mouse_scroll(HWND hwnd, const macdrv_event *event);
 extern void macdrv_release_capture(HWND hwnd, const macdrv_event *event);
 
@@ -307,6 +312,8 @@ extern bool query_pasteboard_data(HWND hwnd, CFStringRef type);
 extern void macdrv_lost_pasteboard_ownership(HWND hwnd);
 
 extern UINT macdrv_OpenGLInit(UINT version, const struct opengl_funcs *opengl_funcs, const struct opengl_driver_funcs **driver_funcs);
+extern UINT macdrv_egl_init(const struct opengl_funcs *opengl_funcs, const struct opengl_driver_funcs **driver_funcs,
+                            char *reason, size_t len);
 extern UINT macdrv_VulkanInit(UINT version, void *vulkan_handle, const struct vulkan_driver_funcs **driver_funcs);
 
 extern CGImageRef create_cgimage_from_icon_bitmaps(HDC hdc, HANDLE icon, HBITMAP hbmColor,

@@ -111,6 +111,9 @@ extern bool allow_immovable_windows;
 extern bool use_confinement_cursor_clipping;
 extern bool cursor_clipping_locks_windows;
 extern bool use_precise_scrolling;
+extern bool use_gcmouse;
+extern bool ime_fallback_position_set;
+extern int ime_fallback_x, ime_fallback_y;
 extern int gl_surface_mode;
 extern CFDictionaryRef localized_strings;
 extern bool retina_enabled;  /* Whether Retina mode is enabled via registry setting. */
@@ -198,7 +201,7 @@ extern void macdrv_set_cocoa_retina_mode(bool new_mode);
 
 
 /* cursor */
-extern void macdrv_set_cursor(CFStringRef name, CFArrayRef frames);
+extern void macdrv_set_cursor(CFStringRef name, CFArrayRef frames, CGFloat scale);
 extern int macdrv_get_cursor_position(CGPoint *pos);
 extern int macdrv_set_cursor_position(CGPoint pos);
 extern int macdrv_clip_cursor(CGRect rect);
@@ -243,6 +246,7 @@ struct macdrv_monitor
 };
 
 extern int macdrv_set_display_mode(CGDirectDisplayID id, CGDisplayModeRef display_mode);
+extern CGDisplayModeRef macdrv_copy_latent_display_mode(CGDirectDisplayID id);
 extern int macdrv_get_gpus(struct macdrv_gpu** gpus, int* count);
 extern void macdrv_free_gpus(struct macdrv_gpu* gpus);
 extern int macdrv_get_adapters(uint64_t gpu_id, struct macdrv_adapter** adapters, int* count);
@@ -266,6 +270,7 @@ enum {
     MOUSE_BUTTON,
     MOUSE_MOVED_RELATIVE,
     MOUSE_MOVED_ABSOLUTE,
+    MOUSE_MOVED_RAW,
     MOUSE_SCROLL,
     QUERY_EVENT,
     QUERY_EVENT_NO_PREEMPT_WAIT,
@@ -441,9 +446,12 @@ extern macdrv_query* macdrv_create_query(void);
 extern macdrv_query* macdrv_retain_query(macdrv_query *query);
 extern void macdrv_release_query(macdrv_query *query);
 extern void macdrv_set_query_done(macdrv_query *query);
+extern void macdrv_begin_query_deferral(void);
+extern void macdrv_end_query_deferral(void);
 extern int macdrv_register_hot_key(WineEventQueue *queue, unsigned int vkey, unsigned int mod_flags,
                                    unsigned int keycode, unsigned int modifiers);
 extern void macdrv_unregister_hot_key(WineEventQueue *queue, unsigned int vkey, unsigned int mod_flags);
+extern bool macdrv_gcmouse_covers_movement(unsigned long time);
 
 
 /* window */
@@ -485,10 +493,11 @@ extern void macdrv_order_cocoa_window(WineWindow *window, WineWindow *prev,
         WineWindow *next, bool activate);
 extern void macdrv_hide_cocoa_window(WineWindow *window);
 extern void macdrv_set_cocoa_window_frame(WineWindow *window, const CGRect* new_frame);
-extern void macdrv_get_cocoa_window_frame(WineWindow *window, CGRect* out_frame);
+extern int macdrv_get_cocoa_window_frame(WineWindow *window, CGRect* out_frame);
 extern void macdrv_set_cocoa_parent_window(WineWindow *window, WineWindow *parent);
 extern void macdrv_window_set_color_image(WineWindow *window, CGImageRef image, CGRect rect, CGRect dirty);
-extern void macdrv_window_set_shape_image(WineWindow *window, CGImageRef image);
+extern void macdrv_window_set_shape_image(WineWindow *window, CGImageRef image, bool covers_view);
+extern void macdrv_window_set_shape_pending(WineWindow *window, bool pending);
 extern void macdrv_set_window_shape(WineWindow *window, const CGRect *rects, int count);
 extern void macdrv_set_window_alpha(WineWindow *window, CGFloat alpha);
 extern void macdrv_window_use_per_pixel_alpha(WineWindow *window, bool use_per_pixel_alpha);
@@ -502,6 +511,7 @@ extern void macdrv_set_view_superview(WineContentView *view, WineContentView *pa
 extern void macdrv_set_view_hidden(WineContentView *view, bool hidden);
 extern void macdrv_add_view_opengl_context(WineContentView *view, WineOpenGLContext *context);
 extern void macdrv_remove_view_opengl_context(WineContentView *view, WineOpenGLContext *context);
+extern CFArrayRef macdrv_copy_view_opengl_contexts(WineContentView *view);
 extern MTLDevice_id macdrv_create_metal_device(void);
 extern void macdrv_release_metal_device(MTLDevice_id device);
 extern WineMetalView *macdrv_view_create_metal_view(WineContentView *view, MTLDevice_id device);
@@ -523,6 +533,7 @@ extern void macdrv_run_on_main_thread(void *block);
 extern uint32_t macdrv_window_background_color(void);
 extern bool macdrv_send_keydown_to_input_source(int keyc, unsigned int flags, int repeat, void *update);
 extern void macdrv_clear_ime_text(void);
+extern void macdrv_set_ime_composition_rect(WineWindow *window, CGRect rect, bool fallback);
 extern bool macdrv_is_any_wine_window_visible(void);
 
 

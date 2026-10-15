@@ -76,12 +76,17 @@ enum {
 
     NSMutableDictionary* originalDisplayModes;
     NSMutableDictionary* latentDisplayModes;
+    NSMutableDictionary* reportedLatentDisplayModes; /* guarded by @synchronized on itself */
     BOOL displaysCapturedForFullscreen;
 
     NSArray*    cursorFrames;
     int         cursorFrame;
+    CGFloat     cursorScale;
     NSTimer*    cursorTimer;
     NSCursor*   cursor;
+    NSArray*    builtCursorFrames;
+    int         builtCursorFrame;
+    CGFloat     builtCursorScale;
     BOOL        cursorIsCurrent;
     BOOL        cursorHidden;
     BOOL        clientWantsCursorHidden;
@@ -128,7 +133,10 @@ enum {
     - (NSPoint) flippedMouseLocation:(NSPoint)point;
 
     - (WineWindow*) frontWineWindow;
+    - (WineWindow*) rawMouseTargetWindow;
     - (void) adjustWindowLevels;
+    - (void) prepareToMiniaturize;
+    - (void) updateFullscreenPresentation:(BOOL)active;
     - (void) updateFullscreenWindows;
 
     - (BOOL) handleEvent:(NSEvent*)anEvent;
@@ -148,3 +156,5 @@ enum {
 
 
 void OnMainThreadAsync(dispatch_block_t block);
+
+void macdrv_start_gcmouse(void);
