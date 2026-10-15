@@ -1437,9 +1437,13 @@ class VkMember(VkVariable):
             return False
 
         if direction == Direction.INPUT:
-            # returnedonly members don't needs input conversions
+            # returnedonly members don't needs input conversions, except extensible structs whose
+            # output needs conversion: their sType and pNext chain are inputs, and the output
+            # conversion walks that chain
             if not self.is_pointer() and self.returnedonly:
-                return False
+                if not (self.is_struct() and self.struct.chain_next and
+                        self.needs_conversion(conv, unwrap, Direction.OUTPUT, struct_const)):
+                    return False
             # pointer arrays always need input conversion
             if conv and self.is_dynamic_array() and self.pointer_array:
                 return True
@@ -2430,8 +2434,10 @@ class Generator(object):
         f.write("    }\n")
         f.write("}\n\n")
 
+        f.write("static void convert_VkPhysicalDeviceProperties2_win32_to_host(struct conversion_context *ctx, const VkPhysicalDeviceProperties232 *in, VkPhysicalDeviceProperties2 *out);\n")
         f.write("static void convert_VkPhysicalDeviceProperties2_host_to_win32(const VkPhysicalDeviceProperties2 *in, VkPhysicalDeviceProperties232 *out);\n")
         f.write("#ifdef _WIN64\n")
+        f.write("static void convert_VkPhysicalDeviceProperties2_win64_to_host(struct conversion_context *ctx, const VkPhysicalDeviceProperties2 *in, VkPhysicalDeviceProperties2 *out);\n")
         f.write("static void convert_VkPhysicalDeviceProperties2_host_to_win64(const VkPhysicalDeviceProperties2 *in, VkPhysicalDeviceProperties2 *out);\n")
         f.write("#endif\n")
 
