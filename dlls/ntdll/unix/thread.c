@@ -76,6 +76,7 @@
 #include "wine/server.h"
 #include "wine/debug.h"
 #include "unix_private.h"
+#include "msync.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(thread);
 WINE_DECLARE_DEBUG_CHANNEL(seh);
@@ -1116,7 +1117,8 @@ static void contexts_from_server( CONTEXT *context, struct context_data server_c
 static DECLSPEC_NORETURN void pthread_exit_wrapper( int status )
 {
     struct thread_data *data = get_thread_data();
-    close( data->alert_fd );
+    /* with msync, alert_fd is an msync object index, not a file descriptor */
+    if (!do_msync()) close( data->alert_fd );
     close( data->wait_fd[0] );
     close( data->wait_fd[1] );
     close( data->reply_fd );

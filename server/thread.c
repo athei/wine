@@ -59,6 +59,7 @@
 #include "request.h"
 #include "user.h"
 #include "security.h"
+#include "msync.h"
 
 
 /* thread queues */
@@ -2380,6 +2381,7 @@ DECL_HANDLER(get_inproc_alert_fd)
     int fd;
 
     if ((fd = get_inproc_sync_fd( current->alert_sync )) < 0) set_error( STATUS_INVALID_PARAMETER );
+    else if (do_msync()) reply->handle = fd;  /* the msync object index, no fd is sent */
     else
     {
         reply->handle = get_thread_id( current ) | 1; /* arbitrary token */
