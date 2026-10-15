@@ -1152,6 +1152,13 @@ NTSTATUS sdl_bus_init(void *args)
 
     /* SDL_QUIT does not stop winedevice; keep the existing signal handlers. */
     pSDL_SetHint(SDL_HINT_NO_SIGNAL_HANDLERS, "1");
+#ifdef __APPLE__
+    /* Rumble on Bluetooth PS4 and PS5 controllers needs their extended input
+     * reports, which programs reading the controller without SDL can't parse;
+     * Windows programs get it through SDL here. */
+    pSDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_PS4_RUMBLE, "1");
+    pSDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_PS5_RUMBLE, "1");
+#endif
     if (pSDL_Init(SDL_INIT_GAMECONTROLLER | SDL_INIT_HAPTIC) < 0)
     {
         ERR("could not init SDL: %s\n", pSDL_GetError());
