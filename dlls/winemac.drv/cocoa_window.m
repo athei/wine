@@ -3073,6 +3073,7 @@ static inline BOOL stage_manager_enabled(void)
         macdrv_event* event;
 
         if (causing_becomeKeyWindow) return;
+        if ([[WineApplicationController sharedController] temporarilyIgnoreResignEventsForDialog]) return;
 
         event = macdrv_create_event(WINDOW_LOST_FOCUS, self);
         [queue postEvent:event];
