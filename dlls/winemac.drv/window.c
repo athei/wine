@@ -1089,6 +1089,8 @@ static void macdrv_client_surface_detach(struct client_surface *client)
             release_win_data(data);
         }
 
+        /* the surface is going away; WineMetalLayer and mtld3d read it from the view */
+        macdrv_set_view_d3dmetal_client_surface(surface->cocoa_view, NULL);
         macdrv_dispose_view(surface->cocoa_view);
     }
 }
@@ -1107,20 +1109,35 @@ static void macdrv_client_surface_update(struct client_surface *client)
     release_win_data(data);
 }
 
+/* Make the surface's cocoa view the one the window shows. Returns whether it
+ * was not already. The caller holds the window data. */
+static bool show_client_view(struct macdrv_client_surface *surface, struct macdrv_win_data *data)
+{
+    if (data->client_view == surface->cocoa_view) return false;
+    if (data->client_view) macdrv_set_view_hidden(data->client_view, TRUE);
+    macdrv_set_view_hidden(surface->cocoa_view, FALSE);
+    data->client_view = surface->cocoa_view;
+    return true;
+}
+
 static void macdrv_client_surface_present(struct client_surface *client, HDC hdc)
 {
     struct macdrv_client_surface *surface = impl_from_client_surface(client);
     struct macdrv_win_data *data;
+    bool shown;
 
     TRACE("%s\n", debugstr_client_surface(client));
 
     if (!(data = get_win_data(surface->client.hwnd))) return;
-    if (data->client_view != surface->cocoa_view)
-    {
-        if (data->client_view) macdrv_set_view_hidden(data->client_view, TRUE);
-        macdrv_set_view_hidden(surface->cocoa_view, FALSE);
-        data->client_view = surface->cocoa_view;
-    }
+    /* mtld3d presents its surface itself: once when a device attaches, which
+     * finds the view that creating the surface showed, and after that only
+     * once that surface's device has drawn a frame, to show the view again or
+     * to size it. So every present but the first comes with a frame, and the
+     * first one counts only if it had to show the view. DXMT marks its frames
+     * through CLIENT_SURFACE_PRESENTED instead. The window data lock guards
+     * present_count and presented. */
+    shown = show_client_view(surface, data);
+    if (surface->present_count++ || shown) surface->presented = true;
     release_win_data(data);
 }
 
@@ -1144,16 +1161,22 @@ struct client_surface *macdrv_CreateClientSurface(HWND hwnd, int pixel_format, B
     struct macdrv_client_surface *surface;
 
     surface = client_surface_create(&macdrv_client_surface_funcs, hwnd, pixel_format, raw);
-    surface->cocoa_view = macdrv_create_view(cgrect_from_rect(surface->client.monitor_rect));
-    macdrv_set_view_hidden(surface->cocoa_view, TRUE);
 
     if (surface)
     {
+        struct macdrv_win_data *data;
+
+        surface->cocoa_view = macdrv_create_view(cgrect_from_rect(surface->client.monitor_rect));
+        macdrv_set_view_hidden(surface->cocoa_view, TRUE);
         macdrv_client_surface_update(&surface->client);
-        macdrv_client_surface_present(&surface->client, 0);
+        if ((data = get_win_data(hwnd)))
+        {
+            show_client_view(surface, data);
+            release_win_data(data);
+        }
     }
 
-    return &surface->client;
+    return surface ? &surface->client : NULL;
 }
 
 bool macdrv_client_surface_acquire_metal_swapchain(struct macdrv_client_surface *surface)
@@ -1258,6 +1281,7 @@ LRESULT macdrv_DesktopWindowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 void macdrv_DestroyWindow(HWND hwnd)
 {
     struct macdrv_win_data *data;
+    CFMutableArrayRef d3dmetal_client_surfaces;
 
     TRACE("%p\n", hwnd);
 
@@ -1267,9 +1291,19 @@ void macdrv_DestroyWindow(HWND hwnd)
 
     destroy_cocoa_window(data);
 
+    d3dmetal_client_surfaces = data->d3dmetal_client_surfaces;
+    data->d3dmetal_client_surfaces = NULL;
+
     CFDictionaryRemoveValue(win_datas, hwnd);
     release_win_data(data);
     free(data);
+
+    /* Releasing a client surface takes win32u's surface lock, and the other
+     * holders of that lock (detach_client_surfaces, update_client_surfaces)
+     * call back into this driver for the window data, so it must not happen
+     * while the window data is held: two threads, one destroying its window
+     * and one creating, moving or destroying its own, would deadlock. */
+    if (d3dmetal_client_surfaces) CFRelease(d3dmetal_client_surfaces);
 }
 
 
@@ -2208,3 +2242,214 @@ void init_win_context(void)
     pthread_mutex_init(&win_data_mutex, &attr);
     pthread_mutexattr_destroy(&attr);
 }
+
+
+/***********************************************************************
+ *              DXMT interface
+ *
+ * DXMT (https://github.com/3Shain/dxmt) and mtld3d (https://github.com/athei/mtld3d)
+ * attach a Metal view to a window's client view through a function table exported
+ * as "macdrv_functions", using the window data layout that CrossOver provides.
+ */
+struct dxmt_win_data
+{
+    HWND                    hwnd;
+    WineWindow             *cocoa_window;
+    WineContentView        *cocoa_view;         /* unused by the consumers, left NULL as on CrossOver */
+    WineContentView        *client_cocoa_view;
+    struct macdrv_win_data *data;               /* not part of the DXMT layout */
+};
+
+/* The consumers declare the first four fields and read them at these offsets. */
+C_ASSERT(offsetof(struct dxmt_win_data, hwnd) == 0);
+C_ASSERT(offsetof(struct dxmt_win_data, cocoa_window) == 1 * sizeof(void *));
+C_ASSERT(offsetof(struct dxmt_win_data, cocoa_view) == 2 * sizeof(void *));
+C_ASSERT(offsetof(struct dxmt_win_data, client_cocoa_view) == 3 * sizeof(void *));
+
+static void cf_client_surface_release(CFAllocatorRef allocator, const void *client_surface)
+{
+    client_surface_release((struct client_surface *)client_surface);
+}
+
+static struct dxmt_win_data *dxmt_get_win_data(HWND hwnd)
+{
+    struct macdrv_client_surface *surface;
+    struct client_surface *client;
+    struct macdrv_win_data *data;
+    struct dxmt_win_data *ret;
+
+    TRACE("%p\n", hwnd);
+
+    /* Create a client surface on every call, as CrossOver does: the consumers
+     * call this only to attach a Metal view to the window, and the surface's
+     * cocoa view, which creating it makes the one the window shows, is where
+     * that view goes. Create it before taking the window data, which creating
+     * it takes as well. */
+    if (!(client = macdrv_CreateClientSurface(hwnd, 0, FALSE))) return NULL;
+    surface = impl_from_client_surface(client);
+
+    if (!(data = get_win_data(hwnd)))
+    {
+        client_surface_release(client);
+        return NULL;
+    }
+    if (!(ret = calloc(1, sizeof(*ret))))
+    {
+        release_win_data(data);
+        client_surface_release(client);
+        return NULL;
+    }
+
+    /* Let WineMetalLayer, and mtld3d, find the surface from its cocoa view. */
+    macdrv_set_view_d3dmetal_client_surface(surface->cocoa_view, client);
+
+    /* The window data keeps the reference until macdrv_DestroyWindow. */
+    if (!data->d3dmetal_client_surfaces)
+    {
+        static const CFArrayCallBacks callbacks = { .release = cf_client_surface_release };
+        data->d3dmetal_client_surfaces = CFArrayCreateMutable(NULL, 0, &callbacks);
+    }
+    CFArrayAppendValue(data->d3dmetal_client_surfaces, client);
+
+    ret->hwnd = data->hwnd;
+    ret->cocoa_window = data->cocoa_window;
+    ret->client_cocoa_view = surface->cocoa_view;
+    ret->data = data;
+    return ret;
+}
+
+/***********************************************************************
+ *              is_d3dmetal_client_view_presenting
+ *
+ * Whether the window's client view is the cocoa view of a client surface
+ * created through macdrv_functions that has presented a frame and still
+ * holds a Metal view, one that DXMT or mtld3d has not released. Until the
+ * first frame the Metal layer shows only its black background, which would
+ * cover what the window draws with GDI before. The caller holds the window
+ * data.
+ */
+bool is_d3dmetal_client_view_presenting(struct macdrv_win_data *data)
+{
+    CFIndex i, count;
+
+    if (!data->client_view || !data->d3dmetal_client_surfaces) return false;
+
+    count = CFArrayGetCount(data->d3dmetal_client_surfaces);
+    for (i = 0; i < count; i++)
+    {
+        struct client_surface *client = (struct client_surface *)CFArrayGetValueAtIndex(data->d3dmetal_client_surfaces, i);
+        struct macdrv_client_surface *surface = impl_from_client_surface(client);
+
+        if (surface->cocoa_view == data->client_view)
+            return surface->presented && macdrv_view_has_metal_view(data->client_view);
+    }
+    return false;
+}
+
+static void dxmt_release_win_data(struct dxmt_win_data *win_data)
+{
+    if (!win_data) return;
+    release_win_data(win_data->data);
+    free(win_data);
+}
+
+static WineWindow *dxmt_get_cocoa_window(HWND hwnd, BOOL require_on_screen)
+{
+    return macdrv_get_cocoa_window(hwnd, require_on_screen);
+}
+
+static void dxmt_init_display_devices(BOOL force)
+{
+    TRACE("%d - no-op\n", force);
+}
+
+struct find_client_surface_ctx
+{
+    const void *client;
+    BOOL        found;
+};
+
+static void find_client_surface(const void *key, const void *value, void *context)
+{
+    const struct macdrv_win_data *data = value;
+    struct find_client_surface_ctx *ctx = context;
+
+    if (!ctx->found && data->d3dmetal_client_surfaces &&
+        CFArrayContainsValue(data->d3dmetal_client_surfaces,
+                             CFRangeMake(0, CFArrayGetCount(data->d3dmetal_client_surfaces)), ctx->client))
+        ctx->found = TRUE;
+}
+
+/***********************************************************************
+ *              macdrv_client_surface_presented
+ *
+ * Handler for CLIENT_SURFACE_PRESENTED events, which WineMetalLayer posts
+ * when a Metal layer outside Wine takes a drawable from a client surface
+ * created through macdrv_functions.
+ */
+void macdrv_client_surface_presented(const macdrv_event *event)
+{
+    struct find_client_surface_ctx ctx = { event->client_surface_presented.client_surface, FALSE };
+    struct client_surface *client = event->client_surface_presented.client_surface;
+
+    TRACE("client_surface %p\n", client);
+
+    /* The event carries a bare pointer, and macdrv_DestroyWindow may have
+     * released the surface since it was posted. Only present a surface that
+     * the data of some window of this process still holds, which covers
+     * swapchains on child windows, and keep a reference on it across the
+     * present, which takes win32u's surface lock and then the window data,
+     * so the window data must not be held then. */
+    pthread_mutex_lock(&win_data_mutex);
+    if (win_datas) CFDictionaryApplyFunction(win_datas, find_client_surface, &ctx);
+    if (ctx.found)
+    {
+        client_surface_add_ref(client);
+        /* the event comes from a frame, see is_d3dmetal_client_view_presenting */
+        impl_from_client_surface(client)->presented = true;
+    }
+    pthread_mutex_unlock(&win_data_mutex);
+
+    if (!ctx.found)
+    {
+        TRACE("client_surface %p is gone\n", client);
+        return;
+    }
+    client_surface_present(client);
+    client_surface_release(client);
+}
+
+struct macdrv_functions_table
+{
+    void                   (*init_display_devices)(BOOL);
+    struct dxmt_win_data  *(*get_win_data)(HWND);
+    void                   (*release_win_data)(struct dxmt_win_data *);
+    WineWindow            *(*get_cocoa_window)(HWND, BOOL);
+    MTLDevice_id           (*create_metal_device)(void);
+    void                   (*release_metal_device)(MTLDevice_id);
+    WineMetalView         *(*view_create_metal_view)(WineContentView *, MTLDevice_id);
+    CAMetalLayer          *(*view_get_metal_layer)(WineMetalView *);
+    void                   (*view_release_metal_view)(WineMetalView *);
+    void                   (*on_main_thread)(void *);
+};
+
+/* The consumers declare these ten entries in this order and read nothing past
+ * them. CrossOver's table has more entries after on_main_thread, which only
+ * D3DMetal uses. */
+C_ASSERT(offsetof(struct macdrv_functions_table, get_win_data) == 1 * sizeof(void *));
+C_ASSERT(offsetof(struct macdrv_functions_table, on_main_thread) == 9 * sizeof(void *));
+C_ASSERT(sizeof(struct macdrv_functions_table) == 10 * sizeof(void *));
+
+__attribute__((visibility("default"))) const struct macdrv_functions_table macdrv_functions =
+{
+    dxmt_init_display_devices,
+    dxmt_get_win_data,
+    dxmt_release_win_data,
+    dxmt_get_cocoa_window,
+    macdrv_create_metal_device,
+    macdrv_release_metal_device,
+    macdrv_view_create_metal_view,
+    macdrv_view_get_metal_layer,
+    macdrv_view_release_metal_view,
+    macdrv_run_on_main_thread,
+};
