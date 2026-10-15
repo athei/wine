@@ -140,7 +140,10 @@ ignored for compatibility with the C compiler.
 .B \--fake-module
 Create a fake PE module for a dll or exe, instead of the normal
 assembly or object file. The PE module contains the resources for the
-module, but no executable code.
+module, but no executable code. With an aarch64 target and
+.BR \-marm64x ,
+the module also carries an empty ARM64EC metadata block, so that both
+ARM64 and ARM64EC processes accept it.
 .TP
 .BI \-F,\ --filename= filename
 Set the file name of the module. The default is to use the base name
