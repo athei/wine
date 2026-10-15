@@ -3232,6 +3232,16 @@ static int peek_message( MSG *msg, const struct peek_message_filter *filter )
             {
                 if (!(flags & PM_NOYIELD) && idle_event) NtSetEvent( idle_event, NULL );
             }
+            /* a loop removing every message class gets WS_EX_COMPOSITED windows painted
+             * here, and the next message that is not WM_PAINT */
+            if (info.msg.message == WM_PAINT &&
+                flags == (PM_REMOVE | PM_QS_INPUT | PM_QS_POSTMESSAGE | PM_QS_PAINT | PM_QS_SENDMESSAGE) &&
+                (get_window_long( info.msg.hwnd, GWL_EXSTYLE ) & WS_EX_COMPOSITED))
+            {
+                send_message( info.msg.hwnd, info.msg.message, info.msg.wParam, info.msg.lParam );
+                flags &= ~PM_QS_PAINT;
+                continue;
+            }
             *msg = info.msg;
             msg->pt = point_phys_to_win_dpi( info.msg.hwnd, info.msg.pt );
             thread_info->message_pos   = MAKELONG( msg->pt.x, msg->pt.y );
