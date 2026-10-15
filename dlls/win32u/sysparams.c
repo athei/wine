@@ -2923,7 +2923,11 @@ static BOOL lock_display_devices( BOOL force )
     if (force)
     {
         if (!get_vulkan_gpus( &ctx.vulkan_gpus )) WARN( "Failed to find any Vulkan GPU\n" );
-        if (!get_opengl_gpus( &ctx.opengl_gpus )) WARN( "Failed to find any OpenGL GPU\n" );
+        /* The OpenGL GPUs only fill in what the Vulkan ones do not have, and finding them
+         * initializes OpenGL, Zink on Mesa's EGL included, in every process that refreshes
+         * the display devices, explorer.exe at least. Only ask OpenGL without a Vulkan GPU. */
+        if (list_empty( &ctx.vulkan_gpus ) && !get_opengl_gpus( &ctx.opengl_gpus ))
+            WARN( "Failed to find any OpenGL GPU\n" );
         if (!(status = update_display_devices( &ctx ))) commit_display_devices( &ctx );
         else WARN( "Failed to update display devices, status %#x\n", status );
         release_display_manager_ctx( &ctx );
