@@ -484,6 +484,36 @@ static const OSType WineHotKeySignature = 'Wine';
     }
 
 
+/* Nonzero while this thread runs code that must not handle queries. */
+static __thread int query_deferral_depth;
+
+
+/***********************************************************************
+ *              macdrv_begin_query_deferral
+ *
+ * Make OnMainThread() on this thread leave queries queued instead of
+ * handling them while it waits, until the matching
+ * macdrv_end_query_deferral().  Query handlers call back into win32u
+ * and into window procedures, so they must not run while the thread
+ * holds a lock that they may need, such as win32u's display lock.  A
+ * deferred query times out on the main thread and is handled later by
+ * the thread's normal event processing.
+ */
+void macdrv_begin_query_deferral(void)
+{
+    query_deferral_depth++;
+}
+
+
+/***********************************************************************
+ *              macdrv_end_query_deferral
+ */
+void macdrv_end_query_deferral(void)
+{
+    query_deferral_depth--;
+}
+
+
 /***********************************************************************
  *              OnMainThread
  *
@@ -498,6 +528,20 @@ void OnMainThread(dispatch_block_t block)
     dispatch_semaphore_t semaphore = NULL;
     __block BOOL finished;
 
+    /* The main thread runs the requests itself, so it would wait forever
+       for this one.  -[WineContentView viewWillDraw] gets here through
+       macdrv_update_opengl_context(). */
+    if ([NSThread isMainThread])
+    {
+        block();
+        return;
+    }
+
+    /* Wait without handling queries.  The pending ones stay queued, and
+       so do the bytes signaling them, for the next event processing. */
+    if (query_deferral_depth)
+        queue = nil;
+
     if (!queue)
     {
         semaphore = dispatch_semaphore_create(0);
@@ -506,14 +550,21 @@ void OnMainThread(dispatch_block_t block)
 
     finished = FALSE;
     OnMainThreadAsync(^{
-        block();
-        finished = TRUE;
-        if (queue)
-            [queue signalEventAvailable];
-        else
+        /* Wake the caller even if the block raises an exception. */
+        @try
         {
-            dispatch_semaphore_signal(semaphore);
-            dispatch_release(semaphore);
+            block();
+        }
+        @finally
+        {
+            finished = TRUE;
+            if (queue)
+                [queue signalEventAvailable];
+            else
+            {
+                dispatch_semaphore_signal(semaphore);
+                dispatch_release(semaphore);
+            }
         }
     });
 
@@ -651,6 +702,44 @@ macdrv_event* macdrv_retain_event(macdrv_event *event)
 }
 
 /***********************************************************************
+ *              release_window
+ *
+ * Drop the reference an event or a query holds on its window.  A window
+ * and its views may only be destroyed on the main thread, so a release
+ * that can be the last one is handed to the main thread.  While the
+ * window is not closing, the reference taken when it was created still
+ * exists and the release here cannot be the last; once it is closing,
+ * that reference is gone or about to go, and a Wine thread's release of
+ * an event posted after the close, or of a query in flight during the
+ * close, could otherwise dealloc the window on that thread.
+ */
+static void release_window(WineWindow* window)
+{
+    if (window && window.closing && ![NSThread isMainThread])
+        OnMainThreadAsync(^{
+            [window release];
+        });
+    else
+        [window release];
+}
+
+/***********************************************************************
+ *              release_window_set
+ *
+ * Drop a set of windows.  The set may hold windows of other threads
+ * in any state, so off the main thread it is released there.
+ */
+static void release_window_set(NSMutableSet* windows)
+{
+    if (windows && ![NSThread isMainThread])
+        OnMainThreadAsync(^{
+            [windows release];
+        });
+    else
+        [windows release];
+}
+
+/***********************************************************************
  *              macdrv_release_event
  *
  * Decrements the reference count of an event.  If the count falls to
@@ -675,11 +764,11 @@ void macdrv_release_event(macdrv_event *event)
                 macdrv_release_query(event->query_event.query);
                 break;
             case WINDOW_GOT_FOCUS:
-                [(NSMutableSet*)event->window_got_focus.tried_windows release];
+                release_window_set((NSMutableSet*)event->window_got_focus.tried_windows);
                 break;
         }
 
-        [event->window release];
+        release_window(event->window);
         free(event);
     }
 }
@@ -728,7 +817,7 @@ void macdrv_release_query(macdrv_query *query)
                     CFRelease(query->pasteboard_data.type);
                 break;
         }
-        [query->window release];
+        release_window(query->window);
         free(query);
     }
 }
@@ -768,7 +857,7 @@ void macdrv_set_query_done(macdrv_query *query)
 int macdrv_register_hot_key(WineEventQueue *queue, unsigned int vkey, unsigned int mod_flags,
                             unsigned int keycode, unsigned int modifiers)
 {
-    __block int ret;
+    __block int ret = MACDRV_HOTKEY_FAILURE;
 
     OnMainThread(^{
         ret = [queue registerHotKey:keycode modifiers:modifiers vkey:vkey modFlags:mod_flags];

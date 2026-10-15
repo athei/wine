@@ -24,6 +24,10 @@
 #endif
 
 #include "config.h"
+
+#include <pthread.h>
+#include <sys/sysctl.h>
+
 #include "macdrv.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(display);
@@ -84,10 +88,28 @@ static int display_mode_bits_per_pixel(CGDisplayModeRef display_mode)
 }
 
 
+static BOOL apple_silicon;
+
+static void detect_apple_silicon(void)
+{
+    int value = 0;
+    size_t size = sizeof(value);
+
+    /* 1 on Apple Silicon, natively and under Rosetta; missing on an Intel Mac */
+    if (!sysctlbyname("hw.optional.arm64", &value, &size, NULL, 0))
+        apple_silicon = value != 0;
+}
+
+
 static BOOL display_mode_is_supported(CGDisplayModeRef display_mode)
 {
+    static pthread_once_t once = PTHREAD_ONCE_INIT;
     uint32_t io_flags = CGDisplayModeGetIOFlags(display_mode);
-    return (io_flags & kDisplayModeValidFlag) && (io_flags & kDisplayModeSafeFlag);
+
+    /* Apple Silicon Macs can leave kDisplayModeSafeFlag off modes they support. */
+    pthread_once(&once, detect_apple_silicon);
+    return (io_flags & kDisplayModeValidFlag) &&
+           ((io_flags & kDisplayModeSafeFlag) || apple_silicon);
 }
 
 
@@ -760,6 +782,11 @@ LONG macdrv_ChangeDisplaySettings(LPDEVMODEW displays, LPCWSTR primary_name, HWN
 
     desc = create_original_display_mode_descriptor(CGMainDisplayID());
 
+    /* win32u holds its display lock across this call.  While the main
+       thread switches the mode, AppKit can start a live resize of a window
+       of this thread, whose query handler reaches the display lock through
+       GetSystemMetrics() and would block this thread on itself. */
+    macdrv_begin_query_deferral();
     for (mode = displays; mode->dmSize && !ret; mode = NEXT_DEVMODEW(mode))
     {
         if (wcsicmp(primary_name, mode->dmDeviceName))
@@ -794,6 +821,7 @@ LONG macdrv_ChangeDisplaySettings(LPDEVMODEW displays, LPCWSTR primary_name, HWN
             ret = DISP_CHANGE_FAILED;
         }
     }
+    macdrv_end_query_deferral();
 
     free_display_mode_descriptor(desc);
     CFRelease(display_modes);

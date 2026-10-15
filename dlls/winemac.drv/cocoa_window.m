@@ -255,6 +255,7 @@ static inline BOOL stage_manager_enabled(void)
 
     - (void) addGLContext:(WineOpenGLContext*)context;
     - (void) removeGLContext:(WineOpenGLContext*)context;
+    - (NSArray*) copyGLContexts;
     - (void) updateGLContexts;
 
     - (void) wine_getBackingSize:(int*)outBackingSize;
@@ -341,6 +342,13 @@ static inline BOOL stage_manager_enabled(void)
     - (BOOL) mouseDownCanMoveWindow
     {
         return NO;
+    }
+
+    - (void) mouseDown:(NSEvent*)event
+    {
+        /* WineApplication already delivered this click to the Windows client.
+           NSView's default forwards it to NSThemeFrame, which starts a window
+           drag and selects the arrow cursor. */
     }
 
     - (NSFocusRingType) focusRingType
@@ -496,6 +504,16 @@ static inline BOOL stage_manager_enabled(void)
         [glContexts removeObjectIdenticalTo:context];
         [pendingGlContexts removeObjectIdenticalTo:context];
         [(WineWindow*)[self window] updateForGLSubviews];
+    }
+
+    - (NSArray*) copyGLContexts
+    {
+        NSMutableArray* contexts = [[NSMutableArray alloc] init];
+        if (glContexts)
+            [contexts addObjectsFromArray:glContexts];
+        if (pendingGlContexts)
+            [contexts addObjectsFromArray:pendingGlContexts];
+        return contexts;
     }
 
     - (void) updateGLContexts:(BOOL)reattach
@@ -949,6 +967,10 @@ static inline BOOL stage_manager_enabled(void)
            borderless windows and between NSWindow and NSPanel. */
         [window setHidesOnDeactivate:NO];
         [window setReleasedWhenClosed:NO];
+        /* Each animated order-in or close leaves a GCD worker thread waiting
+           in -[NSAnimation _runBlocking] permanently (macOS 27).  Enough of
+           them starve the dispatch work that Apple's OpenGL waits for. */
+        [window setAnimationBehavior:NSWindowAnimationBehaviorNone];
 
         [window disableCursorRects];
         [window setShowsResizeIndicator:NO];
@@ -1160,22 +1182,15 @@ static inline BOOL stage_manager_enabled(void)
         else
             level = NSNormalWindowLevel;
 
-        if (active)
+        /* A window covering a screen keeps its level: raised above the menu
+           bar, it breaks Mission Control on macOS 27.  The controller hides
+           the Dock and menu bar instead, as native games do. */
+        if (active && (fullscreen || [self screen]) &&
+            [[WineApplicationController sharedController] areDisplaysCaptured])
         {
-            BOOL captured;
-
-            captured = (fullscreen || [self screen]) && [[WineApplicationController sharedController] areDisplaysCaptured];
-
-            if (captured || fullscreen)
-            {
-                if (captured)
-                    level = CGShieldingWindowLevel() + 1; /* Need +1 or we don't get mouse moves */
-                else
-                    level = NSStatusWindowLevel + 1;
-
-                if (self.floating)
-                    level++;
-            }
+            level = CGShieldingWindowLevel() + 1; /* Need +1 or we don't get mouse moves */
+            if (self.floating)
+                level++;
         }
 
         return level;
@@ -1262,14 +1277,12 @@ static inline BOOL stage_manager_enabled(void)
                          */
                         if (stage_manager_enabled())
                         {
-                            [self setStyleMask:([self styleMask] | NSWindowStyleMaskMiniaturizable)];
-                            [super miniaturize:nil];
+                            [self miniaturizeForWin32];
                         }
                     }
                     else
                     {
-                        [self setStyleMask:([self styleMask] | NSWindowStyleMaskMiniaturizable)];
-                        [super miniaturize:nil];
+                        [self miniaturizeForWin32];
                         discard |= event_mask_for_type(WINDOW_BROUGHT_FORWARD) |
                                    event_mask_for_type(WINDOW_GOT_FOCUS) |
                                    event_mask_for_type(WINDOW_LOST_FOCUS);
@@ -1294,7 +1307,7 @@ static inline BOOL stage_manager_enabled(void)
             maximized = state->maximized;
             [self adjustFeaturesForState];
 
-            if (!maximized && [self inLiveResize])
+            if (!maximized && [self inLiveResize] && !liveResizeForScreen)
                 [self sendResizeStartQuery];
         }
 
@@ -1645,6 +1658,7 @@ static inline BOOL stage_manager_enabled(void)
             BOOL wasVisible;
             WineWindow* parent;
             WineWindow* child;
+            WineWindow* other;
 
             [controller transformProcessToForeground:!self.preventsAppActivation];
             if ([NSApp isHidden])
@@ -1659,9 +1673,11 @@ static inline BOOL stage_manager_enabled(void)
             if ([self becameEligibleParentOrChild])
                 needAdjustWindowLevels = TRUE;
 
-            if (prev || next)
+            /* prev may have been ordered out since this request was queued,
+               which leaves nothing to order relative to when next is nil. */
+            other = [prev isVisible] ? prev : next;
+            if (other)
             {
-                WineWindow* other = [prev isVisible] ? prev : next;
                 NSWindowOrderingMode orderingMode = [prev isVisible] ? NSWindowBelow : NSWindowAbove;
 
                 if (![self isOrdered:orderingMode relativeTo:other])
@@ -1736,8 +1752,7 @@ static inline BOOL stage_manager_enabled(void)
 
             if (pendingMinimize)
             {
-                [self setStyleMask:([self styleMask] | NSWindowStyleMaskMiniaturizable)];
-                [super miniaturize:nil];
+                [self miniaturizeForWin32];
                 pendingMinimize = FALSE;
             }
 
@@ -1809,6 +1824,14 @@ static inline BOOL stage_manager_enabled(void)
                                          event_mask_for_type(WINDOW_MINIMIZE_REQUESTED) |
                                          event_mask_for_type(WINDOW_RESTORE_REQUESTED)
                                forWindow:self];
+    }
+
+    - (BOOL) coversMenuBarScreen
+    {
+        NSScreen* screen = [[NSScreen screens] firstObject];
+        NSRect contentRect = [self contentRectForFrameRect:self.wine_fractionalFrame];
+
+        return screen && fullscreen && screen_covered_by_rect(contentRect, @[screen]);
     }
 
     - (void) updateFullscreen
@@ -2021,8 +2044,9 @@ static inline BOOL stage_manager_enabled(void)
         [self makeKeyWindow];
         causing_becomeKeyWindow = nil;
 
-        [queue discardEventsMatchingMask:event_mask_for_type(WINDOW_GOT_FOCUS) |
-                                         event_mask_for_type(WINDOW_LOST_FOCUS)
+        /* Keep WINDOW_GOT_FOCUS, so Windows follows the key window even
+           when its foreground window changed while this was in flight. */
+        [queue discardEventsMatchingMask:event_mask_for_type(WINDOW_LOST_FOCUS)
                                forWindow:self];
     }
 
@@ -2327,13 +2351,26 @@ static inline BOOL stage_manager_enabled(void)
     // working.  The only real danger would be if Apple changed the return type
     // to a struct or floating-point type, which would change the calling
     // convention.
+    //
+    // On macOS 27, Cocoa wraps that adjustment in a live resize.  It is not
+    // a resize by the user, so it must not be reported to Windows as one:
+    // see windowWillStartLiveResize:.
     - (id) _displayChanged
     {
         macdrv_event* event = macdrv_create_event(REASSERT_WINDOW_POSITION, self);
+
         [queue postEvent:event];
         macdrv_release_event(event);
 
-        return [super _displayChanged];
+        adjustingToScreen = TRUE;
+        @try
+        {
+            return [super _displayChanged];
+        }
+        @finally
+        {
+            adjustingToScreen = FALSE;
+        }
     }
 
     - (BOOL) isExcludedFromWindowsMenu
@@ -2461,6 +2498,14 @@ static inline BOOL stage_manager_enabled(void)
 
             [super sendEvent:event];
         }
+    }
+
+    /* Carry out a minimize that Windows asked for. */
+    - (void) miniaturizeForWin32
+    {
+        [[WineApplicationController sharedController] prepareToMiniaturize];
+        [self setStyleMask:([self styleMask] | NSWindowStyleMaskMiniaturizable)];
+        [super miniaturize:nil];
     }
 
     - (void) miniaturize:(id)sender
@@ -2728,8 +2773,6 @@ static inline BOOL stage_manager_enabled(void)
         if (event)
             [self flagsChanged:event];
 
-        if (causing_becomeKeyWindow == self) return;
-
         [controller windowGotFocus:self];
     }
 
@@ -2763,6 +2806,12 @@ static inline BOOL stage_manager_enabled(void)
 
     - (void) windowDidEndLiveResize:(NSNotification *)notification
     {
+        if (liveResizeForScreen)
+        {
+            liveResizeForScreen = FALSE;
+            return;
+        }
+
         if (!maximized)
         {
             macdrv_event* event = macdrv_create_event(WINDOW_RESIZE_ENDED, self);
@@ -2835,8 +2884,9 @@ static inline BOOL stage_manager_enabled(void)
     - (void)windowDidResize:(NSNotification *)notification skipSizeMove:(BOOL)skipSizeMove
     {
         NSRect frame = self.wine_fractionalFrame;
+        BOOL resizing = [self inLiveResize] && !liveResizeForScreen;
 
-        if ([self inLiveResize])
+        if (resizing)
         {
             if (NSMinX(frame) != NSMinX(frameAtResizeStart))
                 resizingFromLeft = TRUE;
@@ -2855,7 +2905,7 @@ static inline BOOL stage_manager_enabled(void)
 
         [self postWindowFrameChanged:frame
                           fullscreen:([self styleMask] & NSWindowStyleMaskFullScreen) != 0
-                            resizing:[self inLiveResize]
+                            resizing:resizing
                         skipSizeMove:skipSizeMove];
 
         [[[self contentView] inputContext] invalidateCharacterCoordinates];
@@ -2934,7 +2984,7 @@ static inline BOOL stage_manager_enabled(void)
 
     - (NSSize) windowWillResize:(NSWindow*)sender toSize:(NSSize)frameSize
     {
-        if ([self inLiveResize])
+        if ([self inLiveResize] && !liveResizeForScreen)
         {
             if (maximized)
                 return self.wine_fractionalFrame.size;
@@ -2973,6 +3023,14 @@ static inline BOOL stage_manager_enabled(void)
 
     - (void) windowWillStartLiveResize:(NSNotification *)notification
     {
+        /* Cocoa moving the window onto a changed screen: the frame change is
+           reported like any other, without a resize start query.  That query
+           would also wait for the window's thread, which may be the one
+           changing the display mode and waiting for this thread. */
+        liveResizeForScreen = adjustingToScreen;
+        if (liveResizeForScreen)
+            return;
+
         [self endWindowDragging];
 
         if (maximized)
@@ -3147,7 +3205,7 @@ static inline BOOL stage_manager_enabled(void)
 WineWindow *macdrv_create_cocoa_window(const struct macdrv_window_features* wf,
         CGRect frame, void* hwnd, WineEventQueue *queue)
 {
-    __block WineWindow* window;
+    __block WineWindow* window = nil;
 
     OnMainThread(^{
         window = [[WineWindow createWindowWithFeatures:wf
@@ -3174,7 +3232,14 @@ void macdrv_destroy_cocoa_window(WineWindow *window)
         [window close];
     });
     [window.queue discardEventsMatchingMask:-1 forWindow:window];
-    [window release];
+
+    /* The window's views may only be destroyed on the main thread, and
+       the window's dealloc destroys its frame view, so the release that
+       can be the last one is handed to the main thread. The request that
+       closed the window is already done, so this is ordered after it. */
+    OnMainThreadAsync(^{
+        [window release];
+    });
 }
 }
 
@@ -3287,17 +3352,23 @@ void macdrv_set_cocoa_window_frame(WineWindow *window, const CGRect* new_frame)
 /***********************************************************************
  *              macdrv_get_cocoa_window_frame
  *
- * Gets the frame of a Cocoa window.
+ * Gets the frame of a Cocoa window.  Returns zero on failure, non-zero
+ * on success.
  */
-void macdrv_get_cocoa_window_frame(WineWindow *window, CGRect* out_frame)
+int macdrv_get_cocoa_window_frame(WineWindow *window, CGRect* out_frame)
 {
+    __block int ret = FALSE;
+
     OnMainThread(^{
         NSRect frame;
 
         frame = [window contentRectForFrameRect:[window wine_fractionalFrame]];
         [[WineApplicationController sharedController] flipRect:&frame];
         *out_frame = cgrect_win_from_mac(NSRectToCGRect(frame));
+        ret = TRUE;
     });
+
+    return ret;
 }
 
 /***********************************************************************
@@ -3468,7 +3539,7 @@ WineContentView *macdrv_create_view(CGRect rect)
 {
 @autoreleasepool
 {
-    __block WineContentView* view;
+    __block WineContentView* view = nil;
 
     if (CGRectIsNull(rect)) rect = CGRectZero;
 
@@ -3646,6 +3717,17 @@ void macdrv_remove_view_opengl_context(WineContentView *view, WineOpenGLContext 
 }
 }
 
+/***********************************************************************
+ *              macdrv_copy_view_opengl_contexts
+ *
+ * Returns a new array of the OpenGL contexts tracked for a view.  Must be
+ * called on the main thread.  The caller releases the array.
+ */
+CFArrayRef macdrv_copy_view_opengl_contexts(WineContentView *view)
+{
+    return (CFArrayRef)[view copyGLContexts];
+}
+
 id<MTLDevice> macdrv_create_metal_device(void)
 {
 @autoreleasepool
@@ -3664,7 +3746,7 @@ void macdrv_release_metal_device(id<MTLDevice> device)
 
 WineMetalView *macdrv_view_create_metal_view(WineContentView *view, id<MTLDevice> device)
 {
-    __block WineMetalView *metalView;
+    __block WineMetalView *metalView = nil;
 
     OnMainThread(^{
         metalView = [view newMetalViewWithDevice:device];
@@ -3675,7 +3757,7 @@ WineMetalView *macdrv_view_create_metal_view(WineContentView *view, id<MTLDevice
 
 CAMetalLayer *macdrv_view_get_metal_layer(WineMetalView *view)
 {
-    __block CAMetalLayer* layer;
+    __block CAMetalLayer* layer = nil;
 
     OnMainThread(^{
         layer = (CAMetalLayer*)view.layer;
@@ -3963,7 +4045,7 @@ uint32_t macdrv_window_background_color(void)
  */
 bool macdrv_send_keydown_to_input_source(int keyc, unsigned int flags, int repeat, void *update)
 {
-    __block bool ret;
+    __block bool ret = false;
 
     OnMainThread(^{
         WineWindow* window = (WineWindow*)[NSApp keyWindow];
