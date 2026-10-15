@@ -1369,6 +1369,10 @@ static NTSTATUS create_logical_proc_info(void)
     if (sysctlbyname("hw.physicalcpu", &cores_no, &size, NULL, 0))
         cores_no = lcpu_no;
 
+    /* WINENCPU can make lcpu_no lower than the counts of the machine */
+    pkgs_no = min(pkgs_no, lcpu_no);
+    cores_no = min(cores_no, lcpu_no);
+
     TRACE("%u logical CPUs from %u physical cores across %u packages\n",
             lcpu_no, cores_no, pkgs_no);
 
@@ -1431,6 +1435,11 @@ static NTSTATUS create_logical_proc_info(void)
         cache_sharing[4] = cache_sharing[3];
         cache_sharing[3] = cache_sharing[2];
         cache_sharing[2] = cache_sharing[1];
+
+        /* with WINENCPU, a cache whose sharing count doesn't divide the number
+         * of processors is reported as private to each one */
+        for (i = 2; i < 5; i++)
+            if (cache_sharing[i] && lcpu_no % cache_sharing[i]) cache_sharing[i] = 1;
     }
 
     for(p = 0; p < pkgs_no; ++p)
@@ -1754,6 +1763,19 @@ void init_cpu_info(void)
     else WARN("Failed to detect the number of processors.\n");
 #else
     FIXME("Detecting the number of processors is not supported.\n");
+#endif
+#ifdef __APPLE__
+    {
+        /* report fewer processors, for programs that misbehave with many */
+        const char *env = getenv( "WINENCPU" );
+        long limit = env ? atol( env ) : 0;
+
+        if (limit > 0 && limit < cpu_count)
+        {
+            WARN( "Restricting the number of processors to %ld.\n", limit );
+            cpu_count = limit;
+        }
+    }
 #endif
     init_cpu_model();
     get_random( &process_cookie, sizeof(process_cookie) );
@@ -3543,14 +3565,21 @@ NTSTATUS WINAPI NtQuerySystemInformation( SYSTEM_INFORMATION_CLASS class,
                                      (processor_info_array_t*)&pinfo,
                                      &info_count) == 0)
             {
-                int i;
-                cpus = min(cpus,out_cpus);
-                for (i = 0; i < cpus; i++)
+                unsigned int i, host_cpus = cpus;
+
+                /* WINENCPU can make cpu_count lower than the host's count. Host
+                 * processor i is reported as processor i % cpu_count, as by
+                 * NtGetCurrentProcessorNumber(), so its times are added there. */
+                cpus = min(min(host_cpus, cpu_count), out_cpus);
+                for (i = 0; i < host_cpus; i++)
                 {
-                    sppi[i].IdleTime.QuadPart = (ULONGLONG)pinfo[i].cpu_ticks[CPU_STATE_IDLE] * 100000;
-                    sppi[i].KernelTime.QuadPart = (ULONGLONG)pinfo[i].cpu_ticks[CPU_STATE_SYSTEM] * 100000 +
-                                                  sppi[i].IdleTime.QuadPart;
-                    sppi[i].UserTime.QuadPart = (ULONGLONG)pinfo[i].cpu_ticks[CPU_STATE_USER] * 100000;
+                    unsigned int j = i % cpu_count;
+                    ULONGLONG idle = (ULONGLONG)pinfo[i].cpu_ticks[CPU_STATE_IDLE] * 100000;
+
+                    if (j >= cpus) continue;
+                    sppi[j].IdleTime.QuadPart += idle;
+                    sppi[j].KernelTime.QuadPart += (ULONGLONG)pinfo[i].cpu_ticks[CPU_STATE_SYSTEM] * 100000 + idle;
+                    sppi[j].UserTime.QuadPart += (ULONGLONG)pinfo[i].cpu_ticks[CPU_STATE_USER] * 100000;
                 }
                 vm_deallocate (mach_task_self (), (vm_address_t) pinfo, info_count * sizeof(natural_t));
             }

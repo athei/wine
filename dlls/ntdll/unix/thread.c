@@ -2745,7 +2745,8 @@ ULONG WINAPI NtGetCurrentProcessorNumber(void)
     {
         size_t cpu_id;
         pthread_cpu_number_np( &cpu_id );
-        return cpu_id;
+        /* WINENCPU can make cpu_count lower than the number of host processors */
+        return cpu_id % cpu_count;
     }
 #endif
 #if defined(__APPLE__) && (defined(__x86_64__) || defined(__i386__))
@@ -2755,7 +2756,7 @@ ULONG WINAPI NtGetCurrentProcessorNumber(void)
         } p;
         __asm__ __volatile__("sidt %[p]" : [p] "=&m"(p));
         processor = (ULONG)(p.p1 & 0xfff);
-        return processor;
+        return processor % cpu_count;
     }
 #endif
 
