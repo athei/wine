@@ -56,6 +56,8 @@ static void     (WINAPI *pResetToConsistentState)(EXCEPTION_RECORD*,CONTEXT*,ARM
 static NTSTATUS (WINAPI *pThreadInit)(void);
 static void     (WINAPI *pThreadTerm)(HANDLE,LONG);
 static void     (WINAPI *pUpdateProcessorInformation)(SYSTEM_CPU_INFORMATION*);
+static void     (WINAPI *p__wine_fix_memory_info)(MEMORY_BASIC_INFORMATION*);
+static void     (WINAPI *p__wine_notify_memory_write)(void*,SIZE_T,BOOL);
 
 static BOOLEAN emulated_processor_features[PROCESSOR_FEATURE_MAX];
 static BYTE KiUserExceptionDispatcher_orig[16]; /* to detect patching */
@@ -123,6 +125,8 @@ static NTSTATUS create_cross_process_work_list( CHPEV2_PROCESS_INFO *info )
     for (i = 0; list->entries + i + 1 <= end; i++)
         RtlWow64PushCrossProcessWorkOntoFreeList( &list->free_list, &list->entries[i] );
 
+    /* for RtlOpenCrossProcessEmulatorWorkConnection */
+    NtSetInformationProcess( GetCurrentProcess(), ProcessWineCrossProcessWorkSection, &section, sizeof(section) );
     info->SectionHandle = section;
     info->CrossProcessWorkList = list;
     return STATUS_SUCCESS;
@@ -157,6 +161,8 @@ static BOOL send_cross_process_notification( HANDLE process, UINT id, const void
         }
         RtlWow64PushCrossProcessWorkOntoWorkList( &list->work_list, entry, &unused );
     }
+    /* the list is full: the target drops the work and flushes all code instead */
+    else RtlWow64RequestCrossProcessHeavyFlush( &list->work_list );
     NtUnmapViewOfSection( GetCurrentProcess(), list );
     NtClose( section );
     return TRUE;
@@ -214,6 +220,8 @@ NTSTATUS arm64ec_process_init( HMODULE module )
     GET_PTR( ThreadInit );
     GET_PTR( ThreadTerm );
     GET_PTR( UpdateProcessorInformation );
+    GET_PTR( __wine_fix_memory_info );
+    GET_PTR( __wine_notify_memory_write );
 #undef GET_PTR
 
     RtlGetCurrentPeb()->ChpeV2ProcessInfo = info;
@@ -222,6 +230,8 @@ NTSTATUS arm64ec_process_init( HMODULE module )
     memcpy( KiUserExceptionDispatcher_orig, KiUserExceptionDispatcher_thunk, sizeof(KiUserExceptionDispatcher_orig) );
 
     enter_syscall_callback();
+    /* tells the emulator that it gets every query this process makes of its own memory */
+    if (p__wine_fix_memory_info) p__wine_fix_memory_info( NULL );
     if (pProcessInit) status = pProcessInit();
     if (!status)
     {
@@ -524,7 +534,7 @@ DEFINE_SYSCALL(NtQuerySystemTime, (LARGE_INTEGER *time))
 DEFINE_SYSCALL(NtQueryTimer, (HANDLE handle, TIMER_INFORMATION_CLASS class, void *info, ULONG len, ULONG *ret_len))
 DEFINE_SYSCALL(NtQueryTimerResolution, (ULONG *min_res, ULONG *max_res, ULONG *current_res))
 DEFINE_SYSCALL(NtQueryValueKey, (HANDLE handle, const UNICODE_STRING *name, KEY_VALUE_INFORMATION_CLASS info_class, void *info, DWORD length, DWORD *result_len))
-DEFINE_SYSCALL(NtQueryVirtualMemory, (HANDLE process, LPCVOID addr, MEMORY_INFORMATION_CLASS info_class, PVOID buffer, SIZE_T len, SIZE_T *res_len))
+DEFINE_WRAPPED_SYSCALL(NtQueryVirtualMemory, (HANDLE process, LPCVOID addr, MEMORY_INFORMATION_CLASS info_class, PVOID buffer, SIZE_T len, SIZE_T *res_len))
 DEFINE_SYSCALL(NtQueryVolumeInformationFile, (HANDLE handle, IO_STATUS_BLOCK *io, void *buffer, ULONG length, FS_INFORMATION_CLASS info_class))
 DEFINE_SYSCALL(NtQueueApcThread, (HANDLE handle, PNTAPCFUNC func, ULONG_PTR arg1, ULONG_PTR arg2, ULONG_PTR arg3))
 DEFINE_SYSCALL(NtQueueApcThreadEx, (HANDLE handle, HANDLE reserve_handle, PNTAPCFUNC func, ULONG_PTR arg1, ULONG_PTR arg2, ULONG_PTR arg3))
@@ -534,7 +544,7 @@ DEFINE_SYSCALL(NtRaiseHardError, (NTSTATUS status, ULONG count, ULONG params_mas
 DEFINE_WRAPPED_SYSCALL(NtReadFile, (HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, void *apc_user, IO_STATUS_BLOCK *io, void *buffer, ULONG length, LARGE_INTEGER *offset, ULONG *key))
 DEFINE_SYSCALL(NtReadFileScatter, (HANDLE file, HANDLE event, PIO_APC_ROUTINE apc, void *apc_user, IO_STATUS_BLOCK *io, FILE_SEGMENT_ELEMENT *segments, ULONG length, LARGE_INTEGER *offset, ULONG *key))
 DEFINE_SYSCALL(NtReadRequestData, (HANDLE handle, LPC_MESSAGE *request, ULONG id, void *buffer, ULONG len, ULONG *retlen))
-DEFINE_SYSCALL(NtReadVirtualMemory, (HANDLE process, const void *addr, void *buffer, SIZE_T size, SIZE_T *bytes_read))
+DEFINE_WRAPPED_SYSCALL(NtReadVirtualMemory, (HANDLE process, const void *addr, void *buffer, SIZE_T size, SIZE_T *bytes_read))
 DEFINE_SYSCALL(NtRegisterThreadTerminatePort, (HANDLE handle))
 DEFINE_SYSCALL(NtReleaseKeyedEvent, (HANDLE handle, const void *key, BOOLEAN alertable, const LARGE_INTEGER *timeout))
 DEFINE_SYSCALL(NtReleaseMutant, (HANDLE handle, LONG *prev_count))
@@ -611,31 +621,58 @@ DEFINE_SYSCALL(NtWorkerFactoryWorkerReady, (HANDLE handle))
 DEFINE_SYSCALL(NtWriteFile, (HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, void *apc_user, IO_STATUS_BLOCK *io, const void *buffer, ULONG length, LARGE_INTEGER *offset, ULONG *key))
 DEFINE_SYSCALL(NtWriteFileGather, (HANDLE file, HANDLE event, PIO_APC_ROUTINE apc, void *apc_user, IO_STATUS_BLOCK *io, FILE_SEGMENT_ELEMENT *segments, ULONG length, LARGE_INTEGER *offset, ULONG *key))
 DEFINE_SYSCALL(NtWriteRequestData, (HANDLE handle, LPC_MESSAGE *request, ULONG id, void *buffer, ULONG len, ULONG *retlen))
-DEFINE_SYSCALL(NtWriteVirtualMemory, (HANDLE process, void *addr, const void *buffer, SIZE_T size, SIZE_T *bytes_written))
+DEFINE_WRAPPED_SYSCALL(NtWriteVirtualMemory, (HANDLE process, void *addr, const void *buffer, SIZE_T size, SIZE_T *bytes_written))
 DEFINE_SYSCALL(NtYieldExecution, (void))
+
+/* An emulator that compiled code from a writable page traps writes to it by
+ * making it read-only. The syscall would fail on such a page, so the memory
+ * syscalls take locals, and their results are written here, after the
+ * emulator's hooks, where the emulator handles the fault. A NULL pointer is
+ * skipped. */
+static NTSTATUS put_out_params( void **addr_ptr, void *addr, SIZE_T *size_ptr, SIZE_T size,
+                                ULONG *prot_ptr, ULONG prot )
+{
+    __TRY
+    {
+        if (addr_ptr) *addr_ptr = addr;
+        if (size_ptr) *size_ptr = size;
+        if (prot_ptr) *prot_ptr = prot;
+    }
+    __EXCEPT_PAGE_FAULT
+    {
+        return STATUS_ACCESS_VIOLATION;
+    }
+    __ENDTRY
+    return STATUS_SUCCESS;
+}
 
 NTSTATUS SYSCALL_API NtAllocateVirtualMemory( HANDLE process, PVOID *ret, ULONG_PTR zero_bits,
                                               SIZE_T *size_ptr, ULONG type, ULONG protect )
 {
     BOOL is_current = RtlIsCurrentProcess( process );
     NTSTATUS status;
+    void *addr;
+    SIZE_T size;
 
     if (!enter_syscall_callback())
         return syscall_NtAllocateVirtualMemory( process, ret, zero_bits, size_ptr, type, protect );
 
-    if (!*ret && (type & MEM_COMMIT)) type |= MEM_RESERVE;
+    addr = *ret;
+    size = *size_ptr;
+    if (!addr && (type & MEM_COMMIT)) type |= MEM_RESERVE;
 
     if (!is_current) send_cross_process_notification( process, CrossProcessPreVirtualAlloc,
-                                                      *ret, *size_ptr, 3, type, protect, 0 );
-    else if (pNotifyMemoryAlloc) pNotifyMemoryAlloc( *ret, *size_ptr, type, protect, FALSE, 0 );
+                                                      addr, size, 3, type, protect, 0 );
+    else if (pNotifyMemoryAlloc) pNotifyMemoryAlloc( addr, size, type, protect, FALSE, 0 );
 
-    status = syscall_NtAllocateVirtualMemory( process, ret, zero_bits, size_ptr, type, protect );
+    status = syscall_NtAllocateVirtualMemory( process, &addr, zero_bits, &size, type, protect );
 
     if (!is_current) send_cross_process_notification( process, CrossProcessPostVirtualAlloc,
-                                                      *ret, *size_ptr, 3, type, protect, status );
-    else if (pNotifyMemoryAlloc) pNotifyMemoryAlloc( *ret, *size_ptr, type, protect, TRUE, status );
+                                                      addr, size, 3, type, protect, status );
+    else if (pNotifyMemoryAlloc) pNotifyMemoryAlloc( addr, size, type, protect, TRUE, status );
 
     leave_syscall_callback();
+    if (!status) status = put_out_params( ret, addr, size_ptr, size, NULL, 0 );
     return status;
 }
 
@@ -644,23 +681,28 @@ NTSTATUS SYSCALL_API NtAllocateVirtualMemoryEx( HANDLE process, PVOID *ret, SIZE
 {
     BOOL is_current = RtlIsCurrentProcess( process );
     NTSTATUS status;
+    void *addr;
+    SIZE_T size;
 
     if (!enter_syscall_callback())
         return syscall_NtAllocateVirtualMemoryEx( process, ret, size_ptr, type, protect, parameters, count );
 
-    if (!*ret && (type & MEM_COMMIT)) type |= MEM_RESERVE;
+    addr = *ret;
+    size = *size_ptr;
+    if (!addr && (type & MEM_COMMIT)) type |= MEM_RESERVE;
 
     if (!is_current) send_cross_process_notification( process, CrossProcessPreVirtualAlloc,
-                                                      *ret, *size_ptr, 3, type, protect, 0 );
-    else if (pNotifyMemoryAlloc) pNotifyMemoryAlloc( *ret, *size_ptr, type, protect, FALSE, 0 );
+                                                      addr, size, 3, type, protect, 0 );
+    else if (pNotifyMemoryAlloc) pNotifyMemoryAlloc( addr, size, type, protect, FALSE, 0 );
 
-    status = syscall_NtAllocateVirtualMemoryEx( process, ret, size_ptr, type, protect, parameters, count );
+    status = syscall_NtAllocateVirtualMemoryEx( process, &addr, &size, type, protect, parameters, count );
 
     if (!is_current) send_cross_process_notification( process, CrossProcessPostVirtualAlloc,
-                                                      *ret, *size_ptr, 3, type, protect, status );
-    else if (pNotifyMemoryAlloc) pNotifyMemoryAlloc( *ret, *size_ptr, type, protect, TRUE, status );
+                                                      addr, size, 3, type, protect, status );
+    else if (pNotifyMemoryAlloc) pNotifyMemoryAlloc( addr, size, type, protect, TRUE, status );
 
     leave_syscall_callback();
+    if (!status) status = put_out_params( ret, addr, size_ptr, size, NULL, 0 );
     return status;
 }
 
@@ -699,21 +741,27 @@ NTSTATUS SYSCALL_API NtFreeVirtualMemory( HANDLE process, PVOID *addr_ptr, SIZE_
 {
     BOOL is_current = RtlIsCurrentProcess( process );
     NTSTATUS status;
+    void *addr;
+    SIZE_T size;
 
     if (!enter_syscall_callback())
         return syscall_NtFreeVirtualMemory( process, addr_ptr, size_ptr, type );
 
-    if (!is_current) send_cross_process_notification( process, CrossProcessPreVirtualFree,
-                                                      *addr_ptr, *size_ptr, 2, type, 0 );
-    else if (pNotifyMemoryFree) pNotifyMemoryFree( *addr_ptr, *size_ptr, type, FALSE, 0 );
+    addr = *addr_ptr;
+    size = *size_ptr;
 
-    status = syscall_NtFreeVirtualMemory( process, addr_ptr, size_ptr, type );
+    if (!is_current) send_cross_process_notification( process, CrossProcessPreVirtualFree,
+                                                      addr, size, 2, type, 0 );
+    else if (pNotifyMemoryFree) pNotifyMemoryFree( addr, size, type, FALSE, 0 );
+
+    status = syscall_NtFreeVirtualMemory( process, &addr, &size, type );
 
     if (!is_current) send_cross_process_notification( process, CrossProcessPostVirtualFree,
-                                                      *addr_ptr, *size_ptr, 2, type, status );
-    else if (pNotifyMemoryFree) pNotifyMemoryFree( *addr_ptr, *size_ptr, type, TRUE, status );
+                                                      addr, size, 2, type, status );
+    else if (pNotifyMemoryFree) pNotifyMemoryFree( addr, size, type, TRUE, status );
 
     leave_syscall_callback();
+    if (!status) status = put_out_params( addr_ptr, addr, size_ptr, size, NULL, 0 );
     return status;
 }
 
@@ -776,31 +824,91 @@ NTSTATUS SYSCALL_API NtProtectVirtualMemory( HANDLE process, PVOID *addr_ptr, SI
                                              ULONG new_prot, ULONG *old_prot )
 {
     BOOL is_current = RtlIsCurrentProcess( process );
-    NTSTATUS status;
+    ULONG old = PAGE_NOACCESS;
+    NTSTATUS status, put;
+    void *addr;
+    SIZE_T size;
 
     if (!enter_syscall_callback())
         return syscall_NtProtectVirtualMemory( process, addr_ptr, size_ptr, new_prot, old_prot );
 
-    if (!is_current) send_cross_process_notification( process, CrossProcessPreVirtualProtect,
-                                                      *addr_ptr, *size_ptr, 2, new_prot, 0 );
-    else if (pNotifyMemoryProtect) pNotifyMemoryProtect( *addr_ptr, *size_ptr, new_prot, FALSE, 0 );
+    addr = *addr_ptr;
+    size = *size_ptr;
 
-    status = syscall_NtProtectVirtualMemory( process, addr_ptr, size_ptr, new_prot, old_prot );
+    if (!is_current) send_cross_process_notification( process, CrossProcessPreVirtualProtect,
+                                                      addr, size, 2, new_prot, 0 );
+    else if (pNotifyMemoryProtect) pNotifyMemoryProtect( addr, size, new_prot, FALSE, 0 );
+
+    status = syscall_NtProtectVirtualMemory( process, &addr, &size, new_prot, old_prot ? &old : NULL );
 
     if (!is_current) send_cross_process_notification( process, CrossProcessPostVirtualProtect,
-                                                      *addr_ptr, *size_ptr, 2, new_prot, status );
-    else if (pNotifyMemoryProtect) pNotifyMemoryProtect( *addr_ptr, *size_ptr, new_prot, TRUE, status );
+                                                      addr, size, 2, new_prot, status );
+    else if (pNotifyMemoryProtect) pNotifyMemoryProtect( addr, size, new_prot, TRUE, status );
 
     leave_syscall_callback();
-    return status;
+    /* the old protection is set on failure too */
+    put = put_out_params( status ? NULL : addr_ptr, addr, status ? NULL : size_ptr, size, old_prot, old );
+    return status ? status : put;
+}
+
+/* The unix side of a call that only reads state failed to write the caller's
+ * buffer, maybe on a page the emulator write-protected: it lets the write of
+ * the call through, which runs again. A call that succeeds pays nothing. */
+static BOOL retry_with_buffer( NTSTATUS status, void *buffer, SIZE_T size )
+{
+    if (status != STATUS_ACCESS_VIOLATION || !p__wine_notify_memory_write || !buffer || !size) return FALSE;
+    if (!enter_syscall_callback()) return FALSE;
+    p__wine_notify_memory_write( buffer, size, FALSE );
+    return TRUE;
+}
+
+static void retry_done( void *buffer, SIZE_T size )
+{
+    p__wine_notify_memory_write( buffer, size, TRUE );
+    leave_syscall_callback();
 }
 
 NTSTATUS SYSCALL_API NtQuerySystemInformation( SYSTEM_INFORMATION_CLASS class, void *info, ULONG size, ULONG *ret_size )
 {
     NTSTATUS status = syscall_NtQuerySystemInformation( class, info, size, ret_size );
 
+    if (retry_with_buffer( status, info, size ))
+    {
+        status = syscall_NtQuerySystemInformation( class, info, size, ret_size );
+        retry_done( info, size );
+    }
     if (!status && class == SystemCpuInformation && pUpdateProcessorInformation) pUpdateProcessorInformation( info );
     return status;
+}
+
+NTSTATUS SYSCALL_API NtQueryVirtualMemory( HANDLE process, LPCVOID addr, MEMORY_INFORMATION_CLASS info_class,
+                                           PVOID buffer, SIZE_T len, SIZE_T *res_len )
+{
+    MEMORY_BASIC_INFORMATION info;
+    SIZE_T size = 0;
+    NTSTATUS status;
+
+    if (!p__wine_fix_memory_info || info_class != MemoryBasicInformation || len < sizeof(info) ||
+        !RtlIsCurrentProcess( process ) || !enter_syscall_callback())
+        return syscall_NtQueryVirtualMemory( process, addr, info_class, buffer, len, res_len );
+
+    /* the emulator reports the protection of a page it write-protected, and the
+     * result is written outside the syscall, as for the calls above */
+    status = syscall_NtQueryVirtualMemory( process, addr, info_class, &info, sizeof(info), &size );
+    if (!status) p__wine_fix_memory_info( &info );
+    leave_syscall_callback();
+    if (status) return status;
+    __TRY
+    {
+        memcpy( buffer, &info, sizeof(info) );
+        if (res_len) *res_len = size;
+    }
+    __EXCEPT_PAGE_FAULT
+    {
+        return STATUS_ACCESS_VIOLATION;
+    }
+    __ENDTRY
+    return STATUS_SUCCESS;
 }
 
 NTSTATUS SYSCALL_API NtRaiseException( EXCEPTION_RECORD *rec, CONTEXT *context, BOOL first_chance )
@@ -827,6 +935,19 @@ NTSTATUS SYSCALL_API NtReadFile( HANDLE handle, HANDLE event, PIO_APC_ROUTINE ap
     {
         pBTCpu64NotifyReadFile( handle, buffer, length, TRUE, status );
         leave_syscall_callback();
+    }
+    return status;
+}
+
+NTSTATUS SYSCALL_API NtReadVirtualMemory( HANDLE process, const void *addr, void *buffer, SIZE_T size,
+                                          SIZE_T *bytes_read )
+{
+    NTSTATUS status = syscall_NtReadVirtualMemory( process, addr, buffer, size, bytes_read );
+
+    if (retry_with_buffer( status, buffer, size ))
+    {
+        status = syscall_NtReadVirtualMemory( process, addr, buffer, size, bytes_read );
+        retry_done( buffer, size );
     }
     return status;
 }
@@ -898,6 +1019,25 @@ NTSTATUS SYSCALL_API NtUnmapViewOfSectionEx( HANDLE process, void *addr, ULONG f
         return status;
     }
     return syscall_NtUnmapViewOfSectionEx( process, addr, flags );
+}
+
+NTSTATUS SYSCALL_API NtWriteVirtualMemory( HANDLE process, void *addr, const void *buffer, SIZE_T size,
+                                           SIZE_T *bytes_written )
+{
+    SIZE_T written = 0;
+    NTSTATUS status, put;
+
+    if (!p__wine_notify_memory_write || !RtlIsCurrentProcess( process ) || !enter_syscall_callback())
+        return syscall_NtWriteVirtualMemory( process, addr, buffer, size, bytes_written );
+
+    /* the server writes the memory, so the emulator lets it through pages it
+     * write-protected */
+    p__wine_notify_memory_write( addr, size, FALSE );
+    status = syscall_NtWriteVirtualMemory( process, addr, buffer, size, &written );
+    p__wine_notify_memory_write( addr, size, TRUE );
+    leave_syscall_callback();
+    put = put_out_params( NULL, NULL, bytes_written, written, NULL, 0 );
+    return status ? status : put;
 }
 
 

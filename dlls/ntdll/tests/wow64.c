@@ -2264,6 +2264,14 @@ static void test_memory_notifications(void)
 
     if (current_machine == IMAGE_FILE_MACHINE_ARM64) return;
     if (!(module = GetModuleHandleA( "xtajit64.dll" ))) return;
+    /* FEX exports __wine_notify_memory_write for ntdll. A direct call of
+     * ProcessPendingCrossProcessEmulatorWork deadlocks in FEX, which processes
+     * that work only in its own syscall callback state. */
+    if (pRtlFindExportedRoutineByName( module, "__wine_notify_memory_write" ))
+    {
+        skip( "A direct ProcessPendingCrossProcessEmulatorWork deadlocks in FEX.\n" );
+        return;
+    }
     info = NtCurrentTeb()->Peb->ChpeV2ProcessInfo;
     if (info->NativeMachineType == native_machine &&
         info->EmulatedMachineType == IMAGE_FILE_MACHINE_AMD64)

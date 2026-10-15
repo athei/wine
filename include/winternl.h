@@ -2013,6 +2013,7 @@ typedef enum _PROCESSINFOCLASS {
 #ifdef __WINESRC__
     ProcessWineMakeProcessSystem = 1000,
     ProcessWineGrantAdminToken = 1002,
+    ProcessWineCrossProcessWorkSection = 1003,
 #endif
 } PROCESSINFOCLASS;
 
@@ -2441,6 +2442,14 @@ typedef enum _MEMORY_INFORMATION_CLASS {
     MemoryWineUnloadUnixLib,
 #endif
 } MEMORY_INFORMATION_CLASS;
+
+#ifdef __WINESRC__
+/* Wine extension to the MemExtendedParameterAttributeFlags of NtAllocateVirtualMemoryEx: on hosts
+ * that refuse RWX mappings, back a new MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE allocation
+ * with JIT memory (MAP_JIT on macOS) whose write access the caller toggles per thread
+ * (pthread_jit_write_protect_np) around code writes, instead of W^X page flipping on faults. */
+#define MEM_EXTENDED_PARAMETER_WINE_UNIX_JIT 0x80000000
+#endif
 
 typedef struct _MEMORY_SECTION_NAME
 {

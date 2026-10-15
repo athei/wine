@@ -1768,6 +1768,7 @@ void server_init_process_done(void)
     SERVER_END_REQ;
 
     assert( !status );
+    enable_custom_x18_abi();
     signal_start_thread( main_image_info.TransferAddress, peb, data->teb );
 }
 
@@ -1802,6 +1803,7 @@ void server_init_thread( struct thread_data *data )
     if (data->teb)
     {
         init_teb_data( data );
+        enable_custom_x18_abi();
         signal_start_thread( data->start, data->param, data->teb );
     }
     else if (data->start)

@@ -5509,6 +5509,32 @@ struct grant_process_admin_token_reply
 
 
 
+struct set_cross_process_work_section_request
+{
+    struct request_header __header;
+    obj_handle_t section;
+};
+struct set_cross_process_work_section_reply
+{
+    struct reply_header __header;
+};
+
+
+
+struct get_cross_process_work_section_request
+{
+    struct request_header __header;
+    obj_handle_t process;
+};
+struct get_cross_process_work_section_reply
+{
+    struct reply_header __header;
+    obj_handle_t section;
+    char __pad_12[4];
+};
+
+
+
 struct get_token_info_request
 {
     struct request_header __header;
@@ -6556,6 +6582,8 @@ enum request
     REQ_get_kernel_object_handle,
     REQ_make_process_system,
     REQ_grant_process_admin_token,
+    REQ_set_cross_process_work_section,
+    REQ_get_cross_process_work_section,
     REQ_get_token_info,
     REQ_create_linked_token,
     REQ_create_completion,
@@ -6874,6 +6902,8 @@ union generic_request
     struct get_kernel_object_handle_request get_kernel_object_handle_request;
     struct make_process_system_request make_process_system_request;
     struct grant_process_admin_token_request grant_process_admin_token_request;
+    struct set_cross_process_work_section_request set_cross_process_work_section_request;
+    struct get_cross_process_work_section_request get_cross_process_work_section_request;
     struct get_token_info_request get_token_info_request;
     struct create_linked_token_request create_linked_token_request;
     struct create_completion_request create_completion_request;
@@ -7190,6 +7220,8 @@ union generic_reply
     struct get_kernel_object_handle_reply get_kernel_object_handle_reply;
     struct make_process_system_reply make_process_system_reply;
     struct grant_process_admin_token_reply grant_process_admin_token_reply;
+    struct set_cross_process_work_section_reply set_cross_process_work_section_reply;
+    struct get_cross_process_work_section_reply get_cross_process_work_section_reply;
     struct get_token_info_reply get_token_info_reply;
     struct create_linked_token_reply create_linked_token_reply;
     struct create_completion_reply create_completion_reply;
@@ -7240,6 +7272,6 @@ union generic_reply
     struct alpc_create_port_reply alpc_create_port_reply;
 };
 
-#define SERVER_PROTOCOL_VERSION 971
+#define SERVER_PROTOCOL_VERSION 972
 
 #endif /* __WINE_WINE_SERVER_PROTOCOL_H */

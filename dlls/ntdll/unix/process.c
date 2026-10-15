@@ -1587,6 +1587,21 @@ NTSTATUS WINAPI NtQueryInformationProcess( HANDLE handle, PROCESSINFOCLASS class
             break;
         }
 
+    case ProcessWineCrossProcessWorkSection:
+        len = sizeof(HANDLE);
+        if (size != len) ret = STATUS_INFO_LENGTH_MISMATCH;
+        else
+        {
+            SERVER_START_REQ( get_cross_process_work_section )
+            {
+                req->process = wine_server_obj_handle( handle );
+                if (!(ret = wine_server_call( req )))
+                    *(HANDLE *)info = wine_server_ptr_handle( reply->section );
+            }
+            SERVER_END_REQ;
+        }
+        break;
+
     default:
         FIXME("(%p,info_class=%d,%p,0x%08x,%p) Unknown information class\n",
               handle, class, info, size, ret_len );
@@ -1856,6 +1871,17 @@ NTSTATUS WINAPI NtSetInformationProcess( HANDLE handle, PROCESSINFOCLASS class, 
         SERVER_START_REQ( grant_process_admin_token )
         {
             req->handle = wine_server_obj_handle( handle );
+            ret = wine_server_call( req );
+        }
+        SERVER_END_REQ;
+        break;
+
+    case ProcessWineCrossProcessWorkSection:
+        if (size != sizeof(HANDLE)) return STATUS_INFO_LENGTH_MISMATCH;
+        if (handle != GetCurrentProcess()) return STATUS_INVALID_PARAMETER;
+        SERVER_START_REQ( set_cross_process_work_section )
+        {
+            req->section = wine_server_obj_handle( *(HANDLE *)info );
             ret = wine_server_call( req );
         }
         SERVER_END_REQ;

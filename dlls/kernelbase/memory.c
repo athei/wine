@@ -93,6 +93,8 @@ static void send_cross_process_notification( CROSS_PROCESS_WORK_LIST *list, UINT
         }
         RtlWow64PushCrossProcessWorkOntoWorkList( &list->work_list, entry, &unused );
     }
+    /* the list is full: the target drops the work and flushes all code instead */
+    else RtlWow64RequestCrossProcessHeavyFlush( &list->work_list );
 #endif
 }
 

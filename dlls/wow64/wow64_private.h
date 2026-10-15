@@ -46,6 +46,8 @@ extern void     (WINAPI *pBTCpuNotifyMemoryAlloc)( void *, SIZE_T, ULONG, ULONG,
 extern void     (WINAPI *pBTCpuNotifyMemoryDirty)( void *, SIZE_T );
 extern void     (WINAPI *pBTCpuNotifyMemoryFree)( void *, SIZE_T, ULONG, BOOL, NTSTATUS );
 extern void     (WINAPI *pBTCpuNotifyMemoryProtect)( void *, SIZE_T, ULONG, BOOL, NTSTATUS );
+extern void     (WINAPI *p__wine_fix_memory_info)( MEMORY_BASIC_INFORMATION * );
+extern void     (WINAPI *p__wine_notify_memory_write)( void *, SIZE_T, BOOL );
 extern void     (WINAPI *pBTCpuNotifyProcessExecuteFlagsChange)(ULONG);
 extern void     (WINAPI *pBTCpuNotifyReadFile)( HANDLE, void *, SIZE_T, BOOL, NTSTATUS );
 extern void     (WINAPI *pBTCpuNotifyUnmapViewOfSection)( void *, BOOL, NTSTATUS );
@@ -59,6 +61,18 @@ struct object_attr64
     UNICODE_STRING      str;
     SECURITY_DESCRIPTOR sd;
 };
+
+/* The unix side of a call that only reads state failed to write the guest's
+ * buffer, maybe on a page the emulator write-protected: it lets the write of
+ * the call through, which runs again and then calls
+ * p__wine_notify_memory_write( buffer, size, TRUE ). A call that succeeds pays
+ * nothing. */
+static inline BOOL retry_with_guest_buffer( NTSTATUS status, void *buffer, SIZE_T size )
+{
+    if (status != STATUS_ACCESS_VIOLATION || !p__wine_notify_memory_write || !buffer || !size) return FALSE;
+    p__wine_notify_memory_write( buffer, size, FALSE );
+    return TRUE;
+}
 
 /* cf. GetSystemWow64Directory2 */
 static inline const WCHAR *get_machine_wow64_dir( USHORT machine )

@@ -270,6 +270,8 @@ DECL_HANDLER(release_kernel_object);
 DECL_HANDLER(get_kernel_object_handle);
 DECL_HANDLER(make_process_system);
 DECL_HANDLER(grant_process_admin_token);
+DECL_HANDLER(set_cross_process_work_section);
+DECL_HANDLER(get_cross_process_work_section);
 DECL_HANDLER(get_token_info);
 DECL_HANDLER(create_linked_token);
 DECL_HANDLER(create_completion);
@@ -585,6 +587,8 @@ static const req_handler req_handlers[REQ_NB_REQUESTS] =
     (req_handler)req_get_kernel_object_handle,
     (req_handler)req_make_process_system,
     (req_handler)req_grant_process_admin_token,
+    (req_handler)req_set_cross_process_work_section,
+    (req_handler)req_get_cross_process_work_section,
     (req_handler)req_get_token_info,
     (req_handler)req_create_linked_token,
     (req_handler)req_create_completion,
@@ -2159,6 +2163,12 @@ C_ASSERT( offsetof(struct make_process_system_reply, event) == 8 );
 C_ASSERT( sizeof(struct make_process_system_reply) == 16 );
 C_ASSERT( offsetof(struct grant_process_admin_token_request, handle) == 12 );
 C_ASSERT( sizeof(struct grant_process_admin_token_request) == 16 );
+C_ASSERT( offsetof(struct set_cross_process_work_section_request, section) == 12 );
+C_ASSERT( sizeof(struct set_cross_process_work_section_request) == 16 );
+C_ASSERT( offsetof(struct get_cross_process_work_section_request, process) == 12 );
+C_ASSERT( sizeof(struct get_cross_process_work_section_request) == 16 );
+C_ASSERT( offsetof(struct get_cross_process_work_section_reply, section) == 8 );
+C_ASSERT( sizeof(struct get_cross_process_work_section_reply) == 16 );
 C_ASSERT( offsetof(struct get_token_info_request, handle) == 12 );
 C_ASSERT( sizeof(struct get_token_info_request) == 16 );
 C_ASSERT( offsetof(struct get_token_info_reply, token_id) == 8 );

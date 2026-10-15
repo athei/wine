@@ -479,8 +479,13 @@ static void process_unwind_codes( BYTE *ptr, BYTE *end, ARM64_NT_CONTEXT *contex
         else if (*ptr == 0xea)  /* MSFT_OP_CONTEXT */
         {
             DWORD flags = context->ContextFlags & ~CONTEXT_UNWOUND_TO_CALL;
+            /* x64 unwinding restores no flags: the code an unwind resumes
+             * keeps those the unwind started with, not those of the fault;
+             * the same for MSFT_OP_EC_CONTEXT below */
+            DWORD x64_flags = context->Cpsr & cpsr_x64_only_flags;
             ARM64_NT_CONTEXT *src_ctx = (ARM64_NT_CONTEXT *)context->Sp;
             *context = *src_ctx;
+            context->Cpsr = (context->Cpsr & ~cpsr_x64_only_flags) | x64_flags;
             context->ContextFlags = flags | (src_ctx->ContextFlags & CONTEXT_UNWOUND_TO_CALL);
             if (ptrs)
             {
@@ -492,8 +497,10 @@ static void process_unwind_codes( BYTE *ptr, BYTE *end, ARM64_NT_CONTEXT *contex
         else if (*ptr == 0xeb)  /* MSFT_OP_EC_CONTEXT */
         {
             DWORD flags = context->ContextFlags & ~CONTEXT_UNWOUND_TO_CALL;
+            DWORD x64_flags = context->Cpsr & cpsr_x64_only_flags;
             ARM64EC_NT_CONTEXT *src_ctx = (ARM64EC_NT_CONTEXT *)context->Sp;
             context_x64_to_arm( context, src_ctx );
+            context->Cpsr = (context->Cpsr & ~cpsr_x64_only_flags) | x64_flags;
             context->ContextFlags = flags | (src_ctx->ContextFlags & CONTEXT_UNWOUND_TO_CALL);
             if (ptrs) for (i = 8; i < 16; i++) (&ptrs->D8)[i - 8] = &src_ctx->V[i].Low;
             *final_pc_from_lr = FALSE;

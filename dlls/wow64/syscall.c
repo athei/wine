@@ -103,6 +103,8 @@ static NTSTATUS (WINAPI *pBTCpuSetContext)(HANDLE,HANDLE,void *,void *);
 static void     (WINAPI *pBTCpuThreadInit)(void);
 static void *   (WINAPI *p__wine_get_unix_opcode)(void);
 static void *   (WINAPI *pKiRaiseUserExceptionDispatcher)(void);
+void     (WINAPI *p__wine_fix_memory_info)( MEMORY_BASIC_INFORMATION * ) = NULL;
+void     (WINAPI *p__wine_notify_memory_write)( void *, SIZE_T, BOOL ) = NULL;
 void     (WINAPI *pBTCpuFlushInstructionCache2)( const void *, SIZE_T ) = NULL;
 void     (WINAPI *pBTCpuFlushInstructionCacheHeavy)( const void *, SIZE_T ) = NULL;
 NTSTATUS (WINAPI *pBTCpuNotifyMapViewOfSection)( void *, void *, void *, SIZE_T, ULONG, ULONG ) = NULL;
@@ -972,6 +974,8 @@ static NTSTATUS create_cross_process_work_list( WOW64INFO *wow64info )
     for (i = 0; list->entries + i + 1 <= end; i++)
         RtlWow64PushCrossProcessWorkOntoFreeList( &list->free_list, &list->entries[i] );
 
+    /* for RtlOpenCrossProcessEmulatorWorkConnection */
+    NtSetInformationProcess( GetCurrentProcess(), ProcessWineCrossProcessWorkSection, &section, sizeof(section) );
     wow64info->SectionHandle = (ULONG_PTR)section;
     wow64info->CrossProcessWorkList = (ULONG_PTR)list;
     return STATUS_SUCCESS;
@@ -1031,11 +1035,15 @@ static DWORD WINAPI process_init( RTL_RUN_ONCE *once, void *param, void **contex
     GET_PTR( BTCpuProcessTerm );
     GET_PTR( BTCpuThreadTerm );
     GET_PTR( __wine_get_unix_opcode );
+    GET_PTR( __wine_fix_memory_info );
+    GET_PTR( __wine_notify_memory_write );
 
     module = load_64bit_module( L"wow64win.dll" );
     GET_PTR( sdwhwin32 );
     syscall_tables[1] = *psdwhwin32;
 
+    /* tells the emulator that it gets every query this process makes of its own memory */
+    if (p__wine_fix_memory_info) p__wine_fix_memory_info( NULL );
     pBTCpuProcessInit();
 
     module = (HMODULE)(ULONG_PTR)pLdrSystemDllInitBlock->ntdll_handle;
