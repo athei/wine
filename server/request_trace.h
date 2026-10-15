@@ -3063,6 +3063,21 @@ static void dump_grant_process_admin_token_request( const struct grant_process_a
     fprintf( stderr, " handle=%04x", req->handle );
 }
 
+static void dump_set_cross_process_work_section_request( const struct set_cross_process_work_section_request *req )
+{
+    fprintf( stderr, " section=%04x", req->section );
+}
+
+static void dump_get_cross_process_work_section_request( const struct get_cross_process_work_section_request *req )
+{
+    fprintf( stderr, " process=%04x", req->process );
+}
+
+static void dump_get_cross_process_work_section_reply( const struct get_cross_process_work_section_reply *req )
+{
+    fprintf( stderr, " section=%04x", req->section );
+}
+
 static void dump_get_token_info_request( const struct get_token_info_request *req )
 {
     fprintf( stderr, " handle=%04x", req->handle );
@@ -3830,6 +3845,8 @@ static const dump_func req_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_get_kernel_object_handle_request,
     (dump_func)dump_make_process_system_request,
     (dump_func)dump_grant_process_admin_token_request,
+    (dump_func)dump_set_cross_process_work_section_request,
+    (dump_func)dump_get_cross_process_work_section_request,
     (dump_func)dump_get_token_info_request,
     (dump_func)dump_create_linked_token_request,
     (dump_func)dump_create_completion_request,
@@ -4145,6 +4162,8 @@ static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_get_kernel_object_handle_reply,
     (dump_func)dump_make_process_system_reply,
     NULL,
+    NULL,
+    (dump_func)dump_get_cross_process_work_section_reply,
     (dump_func)dump_get_token_info_reply,
     (dump_func)dump_create_linked_token_reply,
     (dump_func)dump_create_completion_reply,
@@ -4460,6 +4479,8 @@ static const char * const req_names[REQ_NB_REQUESTS] =
     "get_kernel_object_handle",
     "make_process_system",
     "grant_process_admin_token",
+    "set_cross_process_work_section",
+    "get_cross_process_work_section",
     "get_token_info",
     "create_linked_token",
     "create_completion",

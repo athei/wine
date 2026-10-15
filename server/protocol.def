@@ -3897,6 +3897,20 @@ struct handle_info
 @END
 
 
+/* Set the section of the emulator's cross-process work list of the current process */
+@REQ(set_cross_process_work_section)
+    obj_handle_t section;         /* handle to the section */
+@END
+
+
+/* Get the section of the emulator's cross-process work list of a process */
+@REQ(get_cross_process_work_section)
+    obj_handle_t process;         /* handle to the process */
+@REPLY
+    obj_handle_t section;         /* handle to the section, 0 if it has none */
+@END
+
+
 /* Get detailed fixed-size information about a token */
 @REQ(get_token_info)
     obj_handle_t   handle;        /* handle to the object */

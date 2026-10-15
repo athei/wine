@@ -323,6 +323,16 @@ void WINAPI RtlOpenCrossProcessEmulatorWorkConnection( HANDLE process, HANDLE *s
     *section = 0;
 
     if (RtlIsCurrentProcess( process )) return;
+
+    /* the server hands out the section for the rights of the memory call that
+     * sends the work, where reading and duplicating its handle need others */
+    if (!NtQueryInformationProcess( process, ProcessWineCrossProcessWorkSection, section, sizeof(*section), NULL ))
+    {
+        if (!*section) return;
+        goto map;
+    }
+    *section = 0;
+
     if (RtlWow64GetSharedInfoProcess( process, &is_wow64, &wow64info )) return;
 
     if (is_wow64) handle = (HANDLE)(ULONG_PTR)wow64info.SectionHandle;
@@ -344,6 +354,7 @@ void WINAPI RtlOpenCrossProcessEmulatorWorkConnection( HANDLE process, HANDLE *s
     if (NtDuplicateObject( process, handle, GetCurrentProcess(), section, 0, 0, DUPLICATE_SAME_ACCESS ))
         return;
 
+map:
     if (!NtMapViewOfSection( *section, GetCurrentProcess(), addr, 0, 0, NULL,
                              &size, ViewShare, 0, PAGE_READWRITE )) return;
 

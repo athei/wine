@@ -53,14 +53,26 @@ static inline ULONG ctx_flags_arm_to_x64( ULONG flags )
     return ret;
 }
 
+/* The x64 flags without an ARM64 counterpart that matter to x64 code go to
+ * Cpsr bits that are RES0 in AArch64 state and inside cpsr_user_mask, so that
+ * they survive the unix side. Not bit 26, which can read as set from NZCV in
+ * native code called from emulated code. The emulator stores the flags
+ * there too, for the handlers to see them and for a continued context to get
+ * them back. */
+static const UINT cpsr_x64_only_flags = 0x00008000 /* auxiliary carry */ | 0x00004000 /* parity */ |
+                                        0x00000020 /* direction */;
+
 static inline UINT eflags_to_cpsr( UINT eflags )
 {
     UINT ret = 0;
 
     if (eflags & 0x0001) ret |= 0x20000000;  /* carry */
+    if (eflags & 0x0004) ret |= 0x00004000;  /* parity */
+    if (eflags & 0x0010) ret |= 0x00008000;  /* auxiliary carry */
     if (eflags & 0x0040) ret |= 0x40000000;  /* zero */
     if (eflags & 0x0080) ret |= 0x80000000;  /* negative */
     if (eflags & 0x0100) ret |= 0x00200000;  /* trap */
+    if (eflags & 0x0400) ret |= 0x00000020;  /* direction */
     if (eflags & 0x0800) ret |= 0x10000000;  /* overflow */
     return ret;
 }
@@ -69,6 +81,9 @@ static inline UINT cpsr_to_eflags( UINT cpsr )
 {
     UINT ret = 0x202;
 
+    if (cpsr & 0x00000020) ret |= 0x0400;  /* direction */
+    if (cpsr & 0x00004000) ret |= 0x0004;  /* parity */
+    if (cpsr & 0x00008000) ret |= 0x0010;  /* auxiliary carry */
     if (cpsr & 0x00200000) ret |= 0x0100;  /* trap */
     if (cpsr & 0x10000000) ret |= 0x0800;  /* overflow */
     if (cpsr & 0x20000000) ret |= 0x0001;  /* carry */

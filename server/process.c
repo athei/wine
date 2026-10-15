@@ -630,6 +630,7 @@ struct process *create_process( int fd, struct process *parent, unsigned int fla
     process->startup_state   = STARTUP_IN_PROGRESS;
     process->startup_info    = NULL;
     process->idle_event      = NULL;
+    process->work_section    = NULL;
     process->peb             = 0;
     process->dir_cache       = NULL;
     process->winstation      = 0;
@@ -735,6 +736,7 @@ static void process_destroy( struct object *obj )
     if (process->console) release_object( process->console );
     if (process->msg_fd) release_object( process->msg_fd );
     if (process->idle_event) release_object( process->idle_event );
+    if (process->work_section) release_object( process->work_section );
     if (process->id) free_ptid( process->id );
     if (process->token) release_object( process->token );
     if (process->sync) release_object( process->sync );
@@ -931,6 +933,8 @@ static void process_killed( struct process *process )
     close_process_handles( process );
     if (process->idle_event) release_object( process->idle_event );
     process->idle_event = NULL;
+    if (process->work_section) release_object( process->work_section );
+    process->work_section = NULL;
     assert( !process->console );
 
     destroy_process_classes( process );

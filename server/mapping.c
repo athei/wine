@@ -1530,6 +1530,32 @@ DECL_HANDLER(create_mapping)
     if (params.root) release_object( params.root );
 }
 
+/* set the section of the emulator's cross-process work list of the current process */
+DECL_HANDLER(set_cross_process_work_section)
+{
+    struct mapping *mapping;
+
+    if (!(mapping = get_mapping_obj( current->process, req->section, SECTION_MAP_READ | SECTION_MAP_WRITE ))) return;
+    if (current->process->work_section) release_object( current->process->work_section );
+    current->process->work_section = &mapping->obj;
+}
+
+/* get the section of the emulator's cross-process work list of a process */
+DECL_HANDLER(get_cross_process_work_section)
+{
+    struct process *process;
+
+    if (!(process = get_process_from_handle( req->process, 0 ))) return;
+    /* the right of any memory call that sends the process work, where reading the
+     * section handle out of it and duplicating it need others */
+    if (!(get_handle_access( current->process, req->process ) & (PROCESS_VM_OPERATION | PROCESS_VM_WRITE)))
+        set_error( STATUS_ACCESS_DENIED );
+    else if (process->work_section)
+        reply->section = alloc_handle( current->process, process->work_section,
+                                       SECTION_MAP_READ | SECTION_MAP_WRITE, 0 );
+    release_object( process );
+}
+
 /* open a handle to a mapping */
 DECL_HANDLER(open_mapping)
 {

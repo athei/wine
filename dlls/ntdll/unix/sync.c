@@ -3519,6 +3519,31 @@ NTSTATUS WINAPI NtAlertMultipleThreadByThreadId( HANDLE *tids, ULONG count, void
 }
 
 
+#ifdef USE_FUTEX
+/* The futex of a thread keeps the sources of its pending alerts as bits. Only
+ * arm64 tells them apart: an x86 emulator (FEX) runs inside the threads of
+ * the x86 code there, and its own locks wait for the alert of the thread too.
+ * Apart from the memory system calls that the emulator's hooks wrap, the
+ * system calls of the x86 code are made on a thread that has a CPU area,
+ * while it is outside the emulator: InSimulation is clear, and so is
+ * InSyscallCallback, which marks the emulator's hooks for system calls. */
+#define TID_ALERT_FROM_EMULATOR  1  /* sent inside the emulator, or by a thread without x86 code */
+#define TID_ALERT_FROM_PROGRAM   2  /* sent by a thread of the x86 code, outside the emulator */
+
+static LONG get_alert_source(void)
+{
+#ifdef __aarch64__
+    struct thread_data *data = get_thread_data();
+    CHPE_V2_CPU_AREA_INFO *cpu_area = data && data->teb ? data->teb->ChpeV2CpuAreaInfo : NULL;
+
+    if (cpu_area && !cpu_area->InSimulation && !cpu_area->InSyscallCallback)
+        return TID_ALERT_FROM_PROGRAM;
+#endif
+    return TID_ALERT_FROM_EMULATOR;
+}
+#endif
+
+
 /***********************************************************************
  *             NtAlertThreadByThreadId (NTDLL.@)
  */
@@ -3533,7 +3558,7 @@ NTSTATUS WINAPI NtAlertThreadByThreadId( HANDLE tid )
 #ifdef USE_FUTEX
     {
         LONG *futex = &entry->futex;
-        if (!InterlockedExchange( futex, 1 ))
+        if (!InterlockedOr( futex, get_alert_source() ))
             futex_wake_one( futex );
         return STATUS_SUCCESS;
     }
@@ -3586,7 +3611,8 @@ static LONGLONG update_timeout( ULONGLONG end )
  */
 NTSTATUS WINAPI NtWaitForAlertByThreadId( const void *address, const LARGE_INTEGER *timeout )
 {
-    union tid_alert_entry *entry = get_tid_alert_entry( ULongToHandle(get_thread_data()->tid) );
+    struct thread_data *data = get_thread_data();
+    union tid_alert_entry *entry = get_tid_alert_entry( ULongToHandle(data->tid) );
 
     TRACE( "%p %s\n", address, debugstr_timeout( timeout ) );
 
@@ -3595,8 +3621,32 @@ NTSTATUS WINAPI NtWaitForAlertByThreadId( const void *address, const LARGE_INTEG
 #ifdef USE_FUTEX
     {
         LONG *futex = &entry->futex;
+#ifdef __aarch64__
+        CHPE_V2_CPU_AREA_INFO *cpu_area = data->teb ? data->teb->ChpeV2CpuAreaInfo : NULL;
+        BOOL in_emulator = cpu_area && (cpu_area->InSimulation || cpu_area->InSyscallCallback);
+        LONG alerts;
+#endif
         ULONGLONG end;
         int ret;
+
+#ifdef __aarch64__
+        /* A thread has a single alert flag. The x86 emulator's own locks wait
+         * for it too while the emulator runs, in its JIT (InSimulation is set)
+         * or in a hook for a system call (InSyscallCallback is set), so such a
+         * wait can take an alert that the x86 code sent (see
+         * get_alert_source()) for one of its own waits, which would then never
+         * wake up. That alert is handed to the next wait outside the emulator,
+         * which returns STATUS_ALERTED at once. The emulator's wait returns as
+         * well, and its caller waits again as after any spurious wakeup. FEX
+         * is in one of these states wherever it takes its locks on a thread of
+         * the x86 code, including the start of each system call, where it
+         * processes the work that other processes queue for this one. */
+        if (!in_emulator && data->deferred_alert)
+        {
+            data->deferred_alert = FALSE;
+            return STATUS_ALERTED;
+        }
+#endif
 
         if (timeout)
         {
@@ -3606,7 +3656,11 @@ NTSTATUS WINAPI NtWaitForAlertByThreadId( const void *address, const LARGE_INTEG
                 end = get_absolute_timeout( timeout );
         }
 
+#ifdef __aarch64__
+        while (!(alerts = InterlockedExchange( futex, 0 )))
+#else
         while (!InterlockedExchange( futex, 0 ))
+#endif
         {
             if (timeout)
             {
@@ -3622,6 +3676,9 @@ NTSTATUS WINAPI NtWaitForAlertByThreadId( const void *address, const LARGE_INTEG
 
             if (ret == -1 && errno == ETIMEDOUT) return STATUS_TIMEOUT;
         }
+#ifdef __aarch64__
+        if (in_emulator && (alerts & TID_ALERT_FROM_PROGRAM)) data->deferred_alert = TRUE;
+#endif
         return STATUS_ALERTED;
     }
 #elif defined(HAVE_KQUEUE)

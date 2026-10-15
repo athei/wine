@@ -56,6 +56,8 @@ static BOOL WINAPIV send_cross_process_notification( HANDLE process, UINT id, co
         }
         RtlWow64PushCrossProcessWorkOntoWorkList( &list->work_list, entry, &unused );
     }
+    /* the list is full: the target drops the work and flushes all code instead */
+    else RtlWow64RequestCrossProcessHeavyFlush( &list->work_list );
     NtUnmapViewOfSection( GetCurrentProcess(), list );
     NtClose( section );
     return TRUE;
@@ -556,18 +558,22 @@ NTSTATUS WINAPI wow64_NtProtectVirtualMemory( UINT *args )
     void *addr = ULongToPtr( *addr32 );
     SIZE_T size = *size32;
     BOOL is_current = RtlIsCurrentProcess( process );
+    ULONG old = PAGE_NOACCESS;
     NTSTATUS status;
 
     if (!is_current) send_cross_process_notification( process, CrossProcessPreVirtualProtect,
                                                       addr, size, 2, new_prot, 0 );
     else if (pBTCpuNotifyMemoryProtect) pBTCpuNotifyMemoryProtect( addr, size, new_prot, FALSE, 0 );
 
-    status = NtProtectVirtualMemory( process, &addr, &size, new_prot, old_prot );
+    /* old_prot can be on a page the emulator write-protected, which only a
+     * write from here, after its hook, gets through */
+    status = NtProtectVirtualMemory( process, &addr, &size, new_prot, old_prot ? &old : NULL );
 
     if (!is_current) send_cross_process_notification( process, CrossProcessPostVirtualProtect,
                                                       addr, size, 2, new_prot, status );
     else if (pBTCpuNotifyMemoryProtect) pBTCpuNotifyMemoryProtect( addr, size, new_prot, TRUE, status );
 
+    if (old_prot) *old_prot = old;
     if (!status)
     {
         put_addr( addr32, addr );
@@ -606,6 +612,8 @@ NTSTATUS WINAPI wow64_NtQueryVirtualMemory( UINT *args )
 
             if (!(status = NtQueryVirtualMemory( handle, addr, class, &info, sizeof(info), &res_len )))
             {
+                /* the emulator reports the protection of a page it write-protected */
+                if (p__wine_fix_memory_info && RtlIsCurrentProcess( handle )) p__wine_fix_memory_info( &info );
                 info32->BaseAddress = PtrToUlong( info.BaseAddress );
                 info32->AllocationBase = PtrToUlong( info.AllocationBase );
                 info32->AllocationProtect = info.AllocationProtect;
@@ -750,6 +758,11 @@ NTSTATUS WINAPI wow64_NtReadVirtualMemory( UINT *args )
     NTSTATUS status;
 
     status = NtReadVirtualMemory( process, addr, buffer, size, &ret_size );
+    if (retry_with_guest_buffer( status, buffer, size ))
+    {
+        status = NtReadVirtualMemory( process, addr, buffer, size, &ret_size );
+        p__wine_notify_memory_write( buffer, size, TRUE );
+    }
     put_size( retlen, ret_size );
     return status;
 }
@@ -934,10 +947,15 @@ NTSTATUS WINAPI wow64_NtWriteVirtualMemory( UINT *args )
     SIZE_T size = get_ulong( &args );
     ULONG *retlen = get_ptr( &args );
 
+    BOOL notify = p__wine_notify_memory_write && RtlIsCurrentProcess( process );
     SIZE_T ret_size;
     NTSTATUS status;
 
+    /* the server writes the memory, so the emulator lets it through pages it
+     * write-protected */
+    if (notify) p__wine_notify_memory_write( addr, size, FALSE );
     status = NtWriteVirtualMemory( process, addr, buffer, size, &ret_size );
+    if (notify) p__wine_notify_memory_write( addr, size, TRUE );
     put_size( retlen, ret_size );
     return status;
 }

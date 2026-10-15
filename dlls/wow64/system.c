@@ -303,6 +303,20 @@ NTSTATUS WINAPI wow64_NtQuerySystemEnvironmentValueEx( UINT *args )
 }
 
 
+/* NtQuerySystemInformation into the guest's buffer */
+static NTSTATUS query_into_guest( SYSTEM_INFORMATION_CLASS class, void *ptr, ULONG len, ULONG *retlen )
+{
+    NTSTATUS status = NtQuerySystemInformation( class, ptr, len, retlen );
+
+    if (retry_with_guest_buffer( status, ptr, len ))
+    {
+        status = NtQuerySystemInformation( class, ptr, len, retlen );
+        p__wine_notify_memory_write( ptr, len, TRUE );
+    }
+    return status;
+}
+
+
 /**********************************************************************
  *           wow64_NtQuerySystemInformation
  */
@@ -335,11 +349,11 @@ NTSTATUS WINAPI wow64_NtQuerySystemInformation( UINT *args )
     case SystemProcessorBrandString:  /* char[] */
     case SystemProcessorFeaturesInformation:  /* SYSTEM_PROCESSOR_FEATURES_INFORMATION */
     case SystemWineVersionInformation:  /* char[] */
-        return NtQuerySystemInformation( class, ptr, len, retlen );
+        return query_into_guest( class, ptr, len, retlen );
 
     case SystemCpuInformation:  /* SYSTEM_CPU_INFORMATION */
     case SystemEmulationProcessorInformation:  /* SYSTEM_CPU_INFORMATION */
-        status = NtQuerySystemInformation( SystemEmulationProcessorInformation, ptr, len, retlen );
+        status = query_into_guest( SystemEmulationProcessorInformation, ptr, len, retlen );
         if (!status && pBTCpuUpdateProcessorInformation) pBTCpuUpdateProcessorInformation( ptr );
         return status;
 
@@ -507,7 +521,7 @@ NTSTATUS WINAPI wow64_NtQuerySystemInformation( UINT *args )
         if (len < sizeof(ULONG)) return STATUS_INFO_LENGTH_MISMATCH;
         if (len < sizeof(*info32))
         {
-            if ((status = NtQuerySystemInformation( class, info32, sizeof(ULONG), retlen ))) return status;
+            if ((status = query_into_guest( class, info32, sizeof(ULONG), retlen ))) return status;
             info32->HighestNodeNumber = min( info32->HighestNodeNumber, max_node_number );
             return STATUS_SUCCESS;
         }

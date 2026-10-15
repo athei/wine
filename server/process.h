@@ -76,6 +76,7 @@ struct process
     enum startup_state   startup_state;   /* startup state */
     struct startup_info *startup_info;    /* startup info while init is in progress */
     struct event        *idle_event;      /* event for input idle */
+    struct object       *work_section;    /* section of the emulator's cross-process work list */
     obj_handle_t         winstation;      /* main handle to process window station */
     obj_handle_t         desktop;         /* handle to desktop to use for new threads */
     struct token        *token;           /* security token associated with this process */
