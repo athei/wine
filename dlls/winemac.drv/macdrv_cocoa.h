@@ -256,6 +256,7 @@ enum {
     APP_ACTIVATED,
     APP_DEACTIVATED,
     APP_QUIT_REQUESTED,
+    CLIENT_SURFACE_PRESENTED,
     DISPLAYS_CHANGED,
     HOTKEY_PRESS,
     KEY_PRESS,
@@ -306,6 +307,9 @@ typedef struct macdrv_event {
         struct {
             int reason;
         }                                           app_quit_requested;
+        struct {
+            void           *client_surface;
+        }                                           client_surface_presented;
         struct {
             bool activating;
         }                                           displays_changed;
@@ -513,6 +517,9 @@ extern void macdrv_create_remote_layer(void* hwnd, unsigned int context_id);
 extern void macdrv_release_remote_layer(void* hwnd, unsigned int context_id);
 extern bool macdrv_get_view_backing_size(WineContentView *view, int backing_size[2]);
 extern void macdrv_set_view_backing_size(WineContentView *view, const int backing_size[2]);
+extern void macdrv_set_view_d3dmetal_client_surface(WineContentView *view, void *client_surface);
+extern bool macdrv_view_has_metal_view(WineContentView *view);
+extern void macdrv_run_on_main_thread(void *block);
 extern uint32_t macdrv_window_background_color(void);
 extern bool macdrv_send_keydown_to_input_source(int keyc, unsigned int flags, int repeat, void *update);
 extern void macdrv_clear_ime_text(void);
