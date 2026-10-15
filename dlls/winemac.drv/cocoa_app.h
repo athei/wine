@@ -80,8 +80,12 @@ enum {
 
     NSArray*    cursorFrames;
     int         cursorFrame;
+    CGFloat     cursorScale;
     NSTimer*    cursorTimer;
     NSCursor*   cursor;
+    NSArray*    builtCursorFrames;
+    int         builtCursorFrame;
+    CGFloat     builtCursorScale;
     BOOL        cursorIsCurrent;
     BOOL        cursorHidden;
     BOOL        clientWantsCursorHidden;
@@ -129,6 +133,7 @@ enum {
 
     - (WineWindow*) frontWineWindow;
     - (void) adjustWindowLevels;
+    - (void) prepareToMiniaturize;
     - (void) updateFullscreenWindows;
 
     - (BOOL) handleEvent:(NSEvent*)anEvent;

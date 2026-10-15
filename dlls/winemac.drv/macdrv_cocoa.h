@@ -198,7 +198,7 @@ extern void macdrv_set_cocoa_retina_mode(bool new_mode);
 
 
 /* cursor */
-extern void macdrv_set_cursor(CFStringRef name, CFArrayRef frames);
+extern void macdrv_set_cursor(CFStringRef name, CFArrayRef frames, CGFloat scale);
 extern int macdrv_get_cursor_position(CGPoint *pos);
 extern int macdrv_set_cursor_position(CGPoint pos);
 extern int macdrv_clip_cursor(CGRect rect);
@@ -441,6 +441,8 @@ extern macdrv_query* macdrv_create_query(void);
 extern macdrv_query* macdrv_retain_query(macdrv_query *query);
 extern void macdrv_release_query(macdrv_query *query);
 extern void macdrv_set_query_done(macdrv_query *query);
+extern void macdrv_begin_query_deferral(void);
+extern void macdrv_end_query_deferral(void);
 extern int macdrv_register_hot_key(WineEventQueue *queue, unsigned int vkey, unsigned int mod_flags,
                                    unsigned int keycode, unsigned int modifiers);
 extern void macdrv_unregister_hot_key(WineEventQueue *queue, unsigned int vkey, unsigned int mod_flags);
@@ -485,7 +487,7 @@ extern void macdrv_order_cocoa_window(WineWindow *window, WineWindow *prev,
         WineWindow *next, bool activate);
 extern void macdrv_hide_cocoa_window(WineWindow *window);
 extern void macdrv_set_cocoa_window_frame(WineWindow *window, const CGRect* new_frame);
-extern void macdrv_get_cocoa_window_frame(WineWindow *window, CGRect* out_frame);
+extern int macdrv_get_cocoa_window_frame(WineWindow *window, CGRect* out_frame);
 extern void macdrv_set_cocoa_parent_window(WineWindow *window, WineWindow *parent);
 extern void macdrv_window_set_color_image(WineWindow *window, CGImageRef image, CGRect rect, CGRect dirty);
 extern void macdrv_window_set_shape_image(WineWindow *window, CGImageRef image);
@@ -502,6 +504,7 @@ extern void macdrv_set_view_superview(WineContentView *view, WineContentView *pa
 extern void macdrv_set_view_hidden(WineContentView *view, bool hidden);
 extern void macdrv_add_view_opengl_context(WineContentView *view, WineOpenGLContext *context);
 extern void macdrv_remove_view_opengl_context(WineContentView *view, WineOpenGLContext *context);
+extern CFArrayRef macdrv_copy_view_opengl_contexts(WineContentView *view);
 extern MTLDevice_id macdrv_create_metal_device(void);
 extern void macdrv_release_metal_device(MTLDevice_id device);
 extern WineMetalView *macdrv_view_create_metal_view(WineContentView *view, MTLDevice_id device);

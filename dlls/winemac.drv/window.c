@@ -1469,7 +1469,7 @@ UINT macdrv_ShowWindow(HWND hwnd, INT cmd, RECT *rect, UINT swp)
         thread_data->current_event->type != WINDOW_DID_UNMINIMIZE)
         goto done;
 
-    macdrv_get_cocoa_window_frame(data->cocoa_window, &frame);
+    if (!macdrv_get_cocoa_window_frame(data->cocoa_window, &frame)) goto done;
     *rect = rect_from_cgrect(frame);
     *rect = window_rect_from_visible(&data->rects, *rect);
     TRACE("rect %s -> %s\n", wine_dbgstr_cgrect(frame), wine_dbgstr_rect(rect));

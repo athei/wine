@@ -67,6 +67,7 @@ static void run_cocoa_app(void* info)
     struct cocoa_app_startup_info* startup_info = info;
     NSConditionLock* lock = startup_info->lock;
     BOOL created_app = FALSE;
+    BOOL success = FALSE;
 
     @autoreleasepool
     {
@@ -76,6 +77,12 @@ static void run_cocoa_app(void* info)
             created_app = TRUE;
         }
 
+        /* Without a value for this default, AppKit looks up the version it
+           was linked against with NSVersionOfRunTimeLibrary(), which walks
+           the loaded images and can crash if a Wine thread unloads a
+           library at the same time. */
+        [[NSUserDefaults standardUserDefaults] registerDefaults:@{ @"NSUseActiveDisplayForMainScreen": @YES }];
+
         if ([NSApp respondsToSelector:@selector(setWineController:)])
         {
             WineApplicationController* controller = [WineApplicationController sharedController];
@@ -83,6 +90,10 @@ static void run_cocoa_app(void* info)
             [controller computeEventTimeAdjustmentFromTicks:startup_info->tickcount uptime:startup_info->uptime_ns];
             startup_info->success = TRUE;
         }
+
+        /* Save success to a local before unlocking: startup_info points to
+           the caller's stack frame, which may be gone once we unlock. */
+        success = startup_info->success;
 
         /* Retain the lock while we're using it, so macdrv_start_cocoa_app()
            doesn't deallocate it in the middle of us unlocking it. */
@@ -92,7 +103,7 @@ static void run_cocoa_app(void* info)
         [lock release];
     }
 
-    if (created_app && startup_info->success)
+    if (created_app && success)
     {
         @autoreleasepool
         {
