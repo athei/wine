@@ -242,6 +242,7 @@ struct macdrv_win_data
     unsigned int        per_pixel_alpha : 1;    /* is window using per-pixel alpha? */
     unsigned int        minimized : 1;          /* is window minimized? */
     unsigned int        fullscreen : 1;         /* is the window visible rect fullscreen? (unrelated to native AppKit/Cocoa fullscreen) */
+    CFMutableArrayRef   d3dmetal_client_surfaces; /* client surfaces created through macdrv_functions */
 };
 
 struct macdrv_client_surface
@@ -249,6 +250,8 @@ struct macdrv_client_surface
     struct client_surface   client;
     WineContentView        *cocoa_view;
     WineMetalSwapChain_id   metal_swapchain;
+    unsigned int            present_count;      /* number of presents, see macdrv_client_surface_present */
+    bool                    presented;          /* has presented a frame */
 };
 
 extern struct macdrv_client_surface *impl_from_client_surface(struct client_surface *client);
@@ -256,6 +259,7 @@ extern bool macdrv_client_surface_acquire_metal_swapchain(struct macdrv_client_s
 
 extern struct macdrv_win_data *get_win_data(HWND hwnd);
 extern void release_win_data(struct macdrv_win_data *data);
+extern bool is_d3dmetal_client_view_presenting(struct macdrv_win_data *data);
 extern void init_win_context(void);
 extern WineWindow *macdrv_get_cocoa_window(HWND hwnd, bool require_on_screen);
 extern RGNDATA *get_region_data(HRGN hrgn, HDC hdc_lptodp);
@@ -270,6 +274,7 @@ extern void macdrv_window_lost_focus(HWND hwnd, const macdrv_event *event);
 extern void macdrv_app_activated(void);
 extern void macdrv_app_deactivated(void);
 extern void macdrv_app_quit_requested(const macdrv_event *event);
+extern void macdrv_client_surface_presented(const macdrv_event *event);
 extern void macdrv_window_maximize_requested(HWND hwnd);
 extern void macdrv_window_minimize_requested(HWND hwnd);
 extern void macdrv_window_did_minimize(HWND hwnd);

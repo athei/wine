@@ -243,6 +243,17 @@ static inline BOOL stage_manager_enabled(void)
 
     WineMetalView *_metalView;
     NSMutableDictionary<NSNumber*, CALayerHost*>* _caLayerHosts;
+
+    /* Whether a WineMetalView that is not hidden is among the subviews,
+       which also counts one moved in from another view. Written on the
+       main thread, read from any thread by macdrv_view_has_metal_view(). */
+    BOOL _hasMetalView;
+
+    /* The client surface whose cocoa view this is, for a surface created
+       through macdrv_functions. Read by WineMetalLayer, and by Metal layers
+       outside Wine (mtld3d) under this name, as on CrossOver. */
+@public
+    void *d3dmetal_client_surface;
 }
 
 @property (readonly, nonatomic) BOOL everHadGLContext;
@@ -255,6 +266,8 @@ static inline BOOL stage_manager_enabled(void)
     - (void) wine_setBackingSize:(const int*)newBackingSize;
 
     - (WineMetalView*) newMetalViewWithDevice:(id<MTLDevice>)device;
+    - (BOOL) hasMetalView;
+    - (void) updateHasMetalViewExcluding:(NSView*)excluded;
     - (void) addCALayerHostViewWithContextId:(CAContextID)contextId;
     - (void) removeCALayerHostView:(CAContextID)contextId;
 
@@ -571,6 +584,11 @@ static inline BOOL stage_manager_enabled(void)
         return _metalView;
     }
 
+    - (BOOL) hasMetalView
+    {
+        return __atomic_load_n(&_hasMetalView, __ATOMIC_RELAXED);
+    }
+
     - (void) addCALayerHostViewWithContextId:(CAContextID)contextId
     {
         if (!_caLayerHosts)
@@ -681,6 +699,13 @@ static inline BOOL stage_manager_enabled(void)
             if (!view->_cachedHasGLDescendantValid || view->_cachedHasGLDescendant)
                 [self invalidateHasGLDescendant];
         }
+        if ([subview isKindOfClass:[WineMetalView class]])
+        {
+            /* A Metal view moved in from another view, as mtld3d does,
+               takes this window's retina mode. */
+            [(WineMetalView*)subview setRetinaMode:retina_on];
+            [self updateHasMetalViewExcluding:nil];
+        }
         [super didAddSubview:subview];
     }
 
@@ -694,7 +719,26 @@ static inline BOOL stage_manager_enabled(void)
         }
         if (subview == _metalView)
             _metalView = nil;
+        if ([subview isKindOfClass:[WineMetalView class]])
+            [self updateHasMetalViewExcluding:subview];
         [super willRemoveSubview:subview];
+    }
+
+    /* Recount whether a WineMetalView that is not hidden is among the
+       subviews, leaving out one that is being removed. Main thread only. */
+    - (void) updateHasMetalViewExcluding:(NSView*)excluded
+    {
+        BOOL hasMetalView = NO;
+
+        for (NSView* view in [self subviews])
+        {
+            if (view != excluded && ![view isHidden] && [view isKindOfClass:[WineMetalView class]])
+            {
+                hasMetalView = YES;
+                break;
+            }
+        }
+        __atomic_store_n(&_hasMetalView, hasMetalView, __ATOMIC_RELAXED);
     }
 
     - (void) setLayer:(CALayer*)newLayer
@@ -821,6 +865,49 @@ static inline BOOL stage_manager_enabled(void)
 @end
 
 
+@interface WineMetalLayer : CAMetalLayer
+@end
+
+
+@implementation WineMetalLayer
+
+    /* Extend [CAMetalLayer nextDrawable] so that a Metal layer outside Wine
+     * (DXMT) that draws into a client surface created through
+     * macdrv_functions has client_surface_present() called for it: that
+     * sizes the surface's cocoa view to the client rect and shows it.
+     * The layer's delegate is the WineMetalView backed by it, and that view's
+     * superview is the client surface's cocoa view.
+     */
+    - (id<CAMetalDrawable>) nextDrawable
+    {
+        if ([self.delegate isKindOfClass:[WineMetalView class]])
+        {
+            NSView* view = (NSView*)self.delegate;
+            NSView* superview = view.superview;
+            NSWindow* window = view.window;
+
+            if ([superview isKindOfClass:[WineContentView class]] &&
+                [window isKindOfClass:[WineWindow class]])
+            {
+                void *client_surface = ((WineContentView*)superview)->d3dmetal_client_surface;
+                if (client_surface)
+                {
+                    macdrv_event* event;
+
+                    event = macdrv_create_event(CLIENT_SURFACE_PRESENTED, (WineWindow*)window);
+                    event->client_surface_presented.client_surface = client_surface;
+                    [[(WineWindow*)window queue] postEvent:event];
+                    macdrv_release_event(event);
+                }
+            }
+        }
+
+        return [super nextDrawable];
+    }
+
+@end
+
+
 @implementation WineMetalView
 
     - (id) initWithFrame:(NSRect)frame device:(id<MTLDevice>)device
@@ -847,9 +934,28 @@ static inline BOOL stage_manager_enabled(void)
         [super setRetinaMode:mode];
     }
 
+    /* A consumer such as mtld3d may hide a Metal view it keeps for a later
+     * device; the client view it sits in then no longer counts as holding one. */
+    - (void) setHidden:(BOOL)hidden
+    {
+        [super setHidden:hidden];
+        if ([NSThread isMainThread])
+        {
+            if ([self.superview isKindOfClass:[WineContentView class]])
+                [(WineContentView*)self.superview updateHasMetalViewExcluding:nil];
+        }
+        else
+        {
+            OnMainThreadAsync(^{
+                if ([self.superview isKindOfClass:[WineContentView class]])
+                    [(WineContentView*)self.superview updateHasMetalViewExcluding:nil];
+            });
+        }
+    }
+
     - (CALayer*) makeBackingLayer
     {
-        CAMetalLayer *layer = [CAMetalLayer layer];
+        CAMetalLayer *layer = [WineMetalLayer layer];
         layer.device = _device;
         layer.framebufferOnly = YES;
         layer.magnificationFilter = kCAFilterNearest;
@@ -3853,6 +3959,36 @@ void macdrv_set_view_backing_size(WineContentView *view, const int backing_size[
 {
     if ([view isKindOfClass:[WineContentView class]])
         [view wine_setBackingSize:backing_size];
+}
+
+/***********************************************************************
+ *              macdrv_set_view_d3dmetal_client_surface
+ */
+void macdrv_set_view_d3dmetal_client_surface(WineContentView *view, void *client_surface)
+{
+    if ([view isKindOfClass:[WineContentView class]])
+        view->d3dmetal_client_surface = client_surface;
+}
+
+/***********************************************************************
+ *              macdrv_view_has_metal_view
+ *
+ * Whether a view holds a Metal view. Can be called from any thread.
+ */
+bool macdrv_view_has_metal_view(WineContentView *view)
+{
+    return [view hasMetalView];
+}
+
+/***********************************************************************
+ *              macdrv_run_on_main_thread
+ *
+ * OnMainThread() for callers that see the block as a plain pointer, such as
+ * the macdrv_functions table.
+ */
+void macdrv_run_on_main_thread(void *block)
+{
+    OnMainThread((dispatch_block_t)block);
 }
 
 /***********************************************************************
