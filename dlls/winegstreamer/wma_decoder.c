@@ -641,14 +641,30 @@ static HRESULT WINAPI media_object_GetStreamCount(IMediaObject *iface, DWORD *in
 
 static HRESULT WINAPI media_object_GetInputStreamInfo(IMediaObject *iface, DWORD index, DWORD *flags)
 {
-    FIXME("iface %p, index %lu, flags %p stub!\n", iface, index, flags);
-    return E_NOTIMPL;
+    TRACE("iface %p, index %lu, flags %p.\n", iface, index, flags);
+
+    if (index > 0)
+        return DMO_E_INVALIDSTREAMINDEX;
+    if (!flags)
+        return E_POINTER;
+
+    *flags = 0;
+
+    return S_OK;
 }
 
 static HRESULT WINAPI media_object_GetOutputStreamInfo(IMediaObject *iface, DWORD index, DWORD *flags)
 {
-    FIXME("iface %p, index %lu, flags %p stub!\n", iface, index, flags);
-    return E_NOTIMPL;
+    TRACE("iface %p, index %lu, flags %p.\n", iface, index, flags);
+
+    if (index > 0)
+        return DMO_E_INVALIDSTREAMINDEX;
+    if (!flags)
+        return E_POINTER;
+
+    *flags = 0;
+
+    return S_OK;
 }
 
 static HRESULT WINAPI media_object_GetInputType(IMediaObject *iface, DWORD index, DWORD type_index,
@@ -951,14 +967,32 @@ static HRESULT WINAPI media_object_AllocateStreamingResources(IMediaObject *ifac
 
 static HRESULT WINAPI media_object_FreeStreamingResources(IMediaObject *iface)
 {
-    FIXME("iface %p stub!\n", iface);
-    return E_NOTIMPL;
+    TRACE("iface %p.\n", iface);
+    return S_OK;
 }
 
 static HRESULT WINAPI media_object_GetInputStatus(IMediaObject *iface, DWORD index, DWORD *flags)
 {
-    FIXME("iface %p, index %lu, flags %p stub!\n", iface, index, flags);
-    return E_NOTIMPL;
+    struct wma_decoder *decoder = impl_from_IMediaObject(iface);
+    bool accepts_input;
+
+    TRACE("iface %p, index %lu, flags %p.\n", iface, index, flags);
+
+    if (index > 0)
+        return DMO_E_INVALIDSTREAMINDEX;
+    if (!flags)
+        return E_POINTER;
+
+    *flags = 0;
+
+    if (!decoder->wg_transform)
+        return DMO_E_TYPE_NOT_SET;
+
+    if (!wg_transform_get_status(decoder->wg_transform, &accepts_input))
+        return E_FAIL;
+
+    *flags = accepts_input ? DMO_INPUT_STATUSF_ACCEPT_DATA : 0;
+    return S_OK;
 }
 
 static HRESULT WINAPI media_object_ProcessInput(IMediaObject *iface, DWORD index,
@@ -1006,8 +1040,8 @@ static HRESULT WINAPI media_object_ProcessOutput(IMediaObject *iface, DWORD flag
 
 static HRESULT WINAPI media_object_Lock(IMediaObject *iface, LONG lock)
 {
-    FIXME("iface %p, lock %ld stub!\n", iface, lock);
-    return E_NOTIMPL;
+    FIXME("iface %p, lock %ld semi-stub!\n", iface, lock);
+    return S_OK;
 }
 
 static const IMediaObjectVtbl media_object_vtbl =
