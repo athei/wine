@@ -313,6 +313,10 @@ struct opengl_driver_funcs
     BOOL (*p_null_surface_create)( int format, struct opengl_drawable **drawable );
     BOOL (*p_cleanup_thread)(void);
     BOOL broken_sharing;
+    /* the window surfaces have the window's physical size, so win32u renders a window
+     * that is DPI virtualized when its drawable is created at its virtual size and scales
+     * it to the surface */
+    BOOL scale_virtualized_windows;
 };
 
 #endif /* WINE_UNIX_LIB */

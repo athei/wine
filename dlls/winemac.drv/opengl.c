@@ -29,6 +29,7 @@
 #include <dlfcn.h>
 
 WINE_DEFAULT_DEBUG_CHANNEL(wgl);
+WINE_DECLARE_DEBUG_CHANNEL(winediag);
 
 struct gl_info {
     char *glExtensions;
@@ -2079,6 +2080,9 @@ static void macdrv_init_extensions(struct opengl_funcs *funcs, BOOLEAN extension
  */
 UINT macdrv_OpenGLInit(UINT version, const struct opengl_funcs *opengl_funcs, const struct opengl_driver_funcs **driver_funcs)
 {
+    char reason[128];
+    UINT status;
+
     TRACE("()\n");
 
     if (version != WINE_OPENGL_DRIVER_VERSION)
@@ -2086,6 +2090,17 @@ UINT macdrv_OpenGLInit(UINT version, const struct opengl_funcs *opengl_funcs, co
         ERR("version mismatch, opengl32 wants %u but macdrv has %u\n", version, WINE_OPENGL_DRIVER_VERSION);
         return STATUS_INVALID_PARAMETER;
     }
+
+    /* compatdb.so chooses: 1 for Mesa's EGL, with Zink on KosmicKrisp, 0 for Apple's
+       OpenGL. Without a value Apple's OpenGL is used, as upstream. */
+    if (ntdll_get_compat_opengl() == 1)
+    {
+        if ((status = macdrv_egl_init(opengl_funcs, driver_funcs, reason, sizeof(reason))))
+            ERR_(winediag)("compatdb asks for Mesa's EGL, but %s; OpenGL is disabled\n", reason);
+        return status;
+    }
+    TRACE("using Apple OpenGL (compatdb value %d)\n", ntdll_get_compat_opengl());
+
     funcs = opengl_funcs;
 
     opengl_handle = dlopen("/System/Library/Frameworks/OpenGL.framework/OpenGL", RTLD_LAZY|RTLD_LOCAL|RTLD_NOLOAD);

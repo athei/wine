@@ -280,6 +280,21 @@ static void sync_window_region(struct macdrv_win_data *data, HRGN win_region)
 
 
 /***********************************************************************
+ *              set_shape_pending
+ *
+ * A window region reaches the Cocoa window as a shape image with the next
+ * flush, which can come after the window is shown.  Tell the Cocoa window
+ * about the region before that, so that it counts as shaped meanwhile.
+ */
+void set_shape_pending(struct macdrv_win_data *data, bool pending)
+{
+    if (!data->cocoa_window || !data->shape_pending == !pending) return;
+    macdrv_window_set_shape_pending(data->cocoa_window, pending);
+    data->shape_pending = pending;
+}
+
+
+/***********************************************************************
  *              sync_window_opacity
  */
 static void sync_window_opacity(struct macdrv_win_data *data, BYTE alpha,
@@ -477,6 +492,7 @@ static void create_cocoa_window(struct macdrv_win_data *data)
 
     data->cocoa_window = macdrv_create_cocoa_window(&wf, frame, data->hwnd, thread_data->queue);
     if (!data->cocoa_window) goto done;
+    if (data->shaped) set_shape_pending(data, TRUE);
 
     set_cocoa_window_properties(data);
 
@@ -510,6 +526,7 @@ static void destroy_cocoa_window(struct macdrv_win_data *data)
     macdrv_destroy_cocoa_window(data->cocoa_window);
     data->cocoa_window = 0;
     data->on_screen = FALSE;
+    data->shape_pending = FALSE;
 }
 
 
@@ -1490,7 +1507,7 @@ UINT macdrv_ShowWindow(HWND hwnd, INT cmd, RECT *rect, UINT swp)
         thread_data->current_event->type != WINDOW_DID_UNMINIMIZE)
         goto done;
 
-    macdrv_get_cocoa_window_frame(data->cocoa_window, &frame);
+    if (!macdrv_get_cocoa_window_frame(data->cocoa_window, &frame)) goto done;
     *rect = rect_from_cgrect(frame);
     *rect = window_rect_from_visible(&data->rects, *rect);
     TRACE("rect %s -> %s\n", wine_dbgstr_cgrect(frame), wine_dbgstr_rect(rect));
@@ -1628,6 +1645,7 @@ BOOL macdrv_WindowPosChanging(HWND hwnd, UINT swp_flags, BOOL shaped, const stru
     TRACE("hwnd %p, swp_flags %04x, shaped %u, rects %s\n", hwnd, swp_flags, shaped, debugstr_window_rects(rects));
 
     if (!data && !(data = macdrv_create_win_data(hwnd, rects))) return FALSE; /* use default surface */
+    if (data->cocoa_window && shaped != data->shaped) set_shape_pending(data, shaped);
     data->shaped = shaped;
 
     ret = !!data->cocoa_window; /* use default surface if we don't have a window */
@@ -1661,12 +1679,40 @@ BOOL macdrv_GetWindowStyleMasks(HWND hwnd, UINT style, UINT ex_style, UINT *styl
 
 
 /***********************************************************************
+ *              get_fullscreen_content_rect
+ *
+ * A full-screen window keeps its aspect ratio in a display mode that
+ * win32u emulates, and win32u widens its visible rect to the whole screen.
+ * Only then does the visible rect extend past the window rect.  Get the
+ * window rect relative to the visible rect, the part of the Cocoa window
+ * that the window's content covers.
+ */
+bool get_fullscreen_content_rect(const struct window_rects *rects, RECT *rect)
+{
+    if (EqualRect(&rects->window, &rects->visible)) return false;
+    /* The frame of a decorated window lies outside its visible rect, and the
+     * visible rect win32u had before widening it is not known here: it is
+     * the window rect less the parts of the frame the Cocoa window draws,
+     * which is not the client rect when the window has a menu bar or a
+     * border Cocoa does not draw.  Such a window gets no bars, and its
+     * surface stays at the left edge of the screen. */
+    if (rects->window.left < rects->visible.left || rects->window.top < rects->visible.top ||
+        rects->window.right > rects->visible.right || rects->window.bottom > rects->visible.bottom)
+        return false;
+
+    *rect = rects->window;
+    OffsetRect(rect, -rects->visible.left, -rects->visible.top);
+    return true;
+}
+
+
+/***********************************************************************
  *              WindowPosChanged   (MACDRV.@)
  */
 void macdrv_WindowPosChanged(HWND hwnd, HWND insert_after, HWND owner_hint, UINT swp_flags,
                              const struct window_rects *new_rects, struct window_surface *surface)
 {
-    BOOL fullscreen = swp_flags & WINE_SWP_FULLSCREEN;
+    BOOL fullscreen = !!(swp_flags & WINE_SWP_FULLSCREEN);
     struct macdrv_thread_data *thread_data;
     struct macdrv_win_data *data;
     unsigned int new_style = NtUserGetWindowLongW(hwnd, GWL_STYLE);
@@ -1717,7 +1763,8 @@ void macdrv_WindowPosChanged(HWND hwnd, HWND insert_after, HWND owner_hint, UINT
 
     if (fullscreen || fullscreen != data->fullscreen)
     {
-        CGRect rect = (fullscreen && !EqualRect(&data->rects.window, &data->rects.visible)) ? cgrect_from_rect(data->rects.window) : CGRectZero;
+        RECT content;
+        CGRect rect = (fullscreen && get_fullscreen_content_rect(&data->rects, &content)) ? cgrect_from_rect(content) : CGRectZero;
         macdrv_set_window_mask(data->cocoa_window, rect);
         data->fullscreen = fullscreen;
     }

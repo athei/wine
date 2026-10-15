@@ -1122,7 +1122,7 @@ BOOL macdrv_ActivateKeyboardLayout(HKL hkl, UINT flags)
 
     LIST_FOR_EACH_ENTRY(layout, &layout_list, struct layout, entry)
     {
-        if (HIWORD(hkl) == layout->layout_id ? layout->layout_id : layout->lang)
+        if (HIWORD(hkl) == (layout->layout_id ? layout->layout_id : layout->lang))
         {
             if (macdrv_select_input_source(layout->input_source))
             {
@@ -1142,6 +1142,14 @@ BOOL macdrv_ActivateKeyboardLayout(HKL hkl, UINT flags)
         }
     }
     pthread_mutex_unlock(&layout_list_mutex);
+
+    /* An HKL that no input source has, such as that of a Windows IME, is
+       accepted as the other drivers accept it, and the input source stays. */
+    if (&layout->entry == &layout_list)
+    {
+        TRACE("no input source for %p, keeping the current one\n", hkl);
+        ret = TRUE;
+    }
 
     if (!ret) return FALSE;
 

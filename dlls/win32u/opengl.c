@@ -2180,6 +2180,17 @@ static struct opengl_drawable *get_window_unused_drawable( HWND hwnd, int format
                 drawable = framebuffer;
                 ERR( "Using experimental framebuffer OpenGL surface\n" );
             }
+            else if (driver_funcs->scale_virtualized_windows && drawable->funcs != &framebuffer_surface_funcs &&
+                     !client->raw && (drawable->virtual_size.cx != drawable->monitor_size.cx ||
+                                      drawable->virtual_size.cy != drawable->monitor_size.cy))
+            {
+                struct opengl_drawable *framebuffer = framebuffer_surface_create( format, client, NULL, drawable );
+                TRACE( "Rendering DPI virtualized window %p at %s, scaled to %s\n", hwnd,
+                       wine_dbgstr_point( (POINT *)&drawable->virtual_size ),
+                       wine_dbgstr_point( (POINT *)&drawable->monitor_size ) );
+                opengl_drawable_release( drawable );
+                drawable = framebuffer;
+            }
 
             use_window_client_surface( client, !!drawable );
             client_surface_release( client );
