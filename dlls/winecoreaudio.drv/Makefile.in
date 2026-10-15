@@ -1,6 +1,7 @@
 UNIXLIB   = winecoreaudio.so
-UNIX_LIBS = $(COREAUDIO_LIBS)
+UNIX_LIBS = $(COREAUDIO_LIBS) -framework AVFoundation -framework Foundation
 
 SOURCES = \
+	authorization.m \
 	coreaudio.c \
 	coremidi.c

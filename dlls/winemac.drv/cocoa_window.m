@@ -3160,6 +3160,7 @@ static inline BOOL stage_manager_enabled(void)
         macdrv_event* event;
 
         if (causing_becomeKeyWindow) return;
+        if ([[WineApplicationController sharedController] temporarilyIgnoreResignEventsForDialog]) return;
         /* AppKit finishes a minimize that Windows has undone already: the
            window is miniaturized when it loses the key status.  The window
            keeps the foreground, and windowDidMiniaturize: restores it, which
