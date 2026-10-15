@@ -69,12 +69,14 @@
 #include "wine/unixlib.h"
 
 #include "unixlib.h"
+#include "coreaudio_cocoa.h"
 
 #if !defined(MAC_OS_VERSION_12_0) || MAC_OS_X_VERSION_MAX_ALLOWED < MAC_OS_VERSION_12_0
 #define kAudioObjectPropertyElementMain kAudioObjectPropertyElementMaster
 #endif
 
 WINE_DEFAULT_DEBUG_CHANNEL(coreaudio);
+WINE_DECLARE_DEBUG_CHANNEL(winediag);
 
 struct coreaudio_stream
 {
@@ -856,6 +858,21 @@ static NTSTATUS unix_create_stream(void *args)
         WARN("Couldn't set callback: %x\n", (int)sc);
         params->result = osstatus_to_hresult(sc);
         goto end;
+    }
+
+    if(stream->flow == eCapture){
+        /* The process records silence until the user allows it to use the
+         * microphone. Ask now if the user hasn't decided yet, so the stream
+         * starts with the answer in place. */
+        int status = CoreAudio_get_capture_authorization_status();
+
+        TRACE("microphone authorization status %d\n", status);
+        if(status == CAPTURE_AUTHORIZATION_NOT_DETERMINED)
+            status = CoreAudio_request_capture_authorization() ?
+                     CAPTURE_AUTHORIZATION_AUTHORIZED : CAPTURE_AUTHORIZATION_DENIED;
+        if(status != CAPTURE_AUTHORIZATION_AUTHORIZED)
+            ERR_(winediag)("Microphone access is denied; it can be allowed in System Settings, "
+                           "Privacy & Security, Microphone.\n");
     }
 
     sc = AudioUnitInitialize(stream->unit);
