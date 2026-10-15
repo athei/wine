@@ -27,6 +27,8 @@
 #include "config.h"
 
 #include <assert.h>
+#include <dlfcn.h>
+#include <stdbool.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdlib.h>
@@ -1129,6 +1131,38 @@ static BOOL handle_syscall_fault( struct thread_data *data, ucontext_t *context,
 
 
 /**********************************************************************
+ *		crash_without_teb
+ *
+ * Handle a signal on a thread without a TEB, which never runs Windows code:
+ * a thread that Wine did not create, or on macOS the original main thread,
+ * which runs the Cocoa run loop. The signal can't be raised as a Windows
+ * exception there: setup_raise_exception() dereferences the missing TEB,
+ * faults again inside the handler, and the process hangs. Restore the
+ * default action instead, so the process crashes and leaves a crash report.
+ */
+static void crash_without_teb( int signal, siginfo_t *siginfo, ucontext_t *sigcontext )
+{
+    struct sigaction sig_act;
+
+    sig_act.sa_handler = SIG_DFL;
+    sig_act.sa_flags = 0;
+    sigemptyset( &sig_act.sa_mask );
+    sigaction( signal, &sig_act, NULL );
+
+    ERR( "signal %d on a thread without a TEB, pc %p, address %p\n",
+         signal, (void *)PC_sig(sigcontext), siginfo->si_addr );
+
+    /* Send the signal again instead of waiting for the instruction to fault
+     * again: another thread may make the address accessible before it runs
+     * again, and the default action would then stay installed for the whole
+     * process. The signal is blocked while its handler runs, so it is
+     * delivered as soon as the handler returns, before the interrupted code
+     * runs again. */
+    pthread_kill( pthread_self(), signal );
+}
+
+
+/**********************************************************************
  *		segv_handler
  *
  * Handler for SIGSEGV and related errors.
@@ -1152,6 +1186,11 @@ static void segv_handler( int signal, siginfo_t *siginfo, void *_sigcontext )
     case ESR_ELx_EC_DABT_CUR:
         if (ESR_ELx_ISS_DFSC(esr) == ESR_ELx_ISS_DFSC_ALIGN_FAULT)
         {
+            if (!data || !data->teb)
+            {
+                crash_without_teb( signal, siginfo, sigcontext );
+                return;
+            }
             rec.ExceptionCode = EXCEPTION_DATATYPE_MISALIGNMENT;
             save_context( &context, sigcontext );
             setup_raise_exception( data, sigcontext, &rec, &context );
@@ -1171,7 +1210,12 @@ static void segv_handler( int signal, siginfo_t *siginfo, void *_sigcontext )
     rec.NumberParameters = 2;
 
     if (!virtual_handle_fault( data, &rec, (void *)SP_sig(sigcontext) )) return;
-    if (handle_syscall_fault( data, sigcontext, &rec )) return;
+    if (data && handle_syscall_fault( data, sigcontext, &rec )) return;
+    if (!data || !data->teb)
+    {
+        crash_without_teb( signal, siginfo, sigcontext );
+        return;
+    }
 
     save_context( &context, sigcontext );
     setup_raise_exception( data, sigcontext, &rec, &context );
@@ -1205,6 +1249,11 @@ static void ill_handler( int signal, siginfo_t *siginfo, void *_sigcontext )
         }
     }
 
+    if (!data || !data->teb)
+    {
+        crash_without_teb( signal, siginfo, sigcontext );
+        return;
+    }
     save_context( &context, sigcontext );
     setup_raise_exception( data, sigcontext, &rec, &context );
 }
@@ -1224,6 +1273,11 @@ static void trap_handler( int signal, siginfo_t *siginfo, void *_sigcontext )
                              .ExceptionAddress = (void *)PC_sig(sigcontext) };
     DWORD64 esr = 0;
 
+    if (!data || !data->teb)
+    {
+        crash_without_teb( signal, siginfo, sigcontext );
+        return;
+    }
     save_context( &context, sigcontext );
 
 #ifdef linux
@@ -1333,6 +1387,11 @@ static void fpe_handler( int signal, siginfo_t *siginfo, void *_sigcontext )
         rec.ExceptionCode = EXCEPTION_FLT_INVALID_OPERATION;
         break;
     }
+    if (!data || !data->teb)
+    {
+        crash_without_teb( signal, siginfo, sigcontext );
+        return;
+    }
     save_context( &context, sigcontext );
     setup_raise_exception( data, sigcontext, &rec, &context );
 }
@@ -1368,6 +1427,11 @@ static void abrt_handler( int signal, siginfo_t *siginfo, void *_sigcontext )
                              .ExceptionFlags = EXCEPTION_NONCONTINUABLE,
                              .ExceptionAddress = (void *)PC_sig(sigcontext) };
 
+    if (!data || !data->teb)
+    {
+        crash_without_teb( signal, siginfo, sigcontext );
+        return;
+    }
     save_context( &context, sigcontext );
     setup_raise_exception( data, sigcontext, &rec, &context );
 }
@@ -1383,6 +1447,13 @@ static void quit_handler( int signal, siginfo_t *siginfo, void *_sigcontext )
     ucontext_t *sigcontext = _sigcontext;
     struct thread_data *data = get_thread_data();
 
+    /* the server terminates the threads Wine created without a TEB with
+     * SIGQUIT too; they have thread data and exit below */
+    if (!data)
+    {
+        crash_without_teb( signal, siginfo, sigcontext );
+        return;
+    }
     if (is_inside_syscall( data, SP_sig(sigcontext) )) abort_thread(0);
     user_mode_abort_thread( 0, get_syscall_frame( data ));
 }
@@ -1680,6 +1751,32 @@ void init_syscall_frame( LPTHREAD_START_ROUTINE entry, void *arg, TEB *teb )
 
     pthread_sigmask( SIG_UNBLOCK, &server_block_set, NULL );
 }
+
+
+#ifdef __APPLE__
+/***********************************************************************
+ *           enable_custom_x18_abi
+ *
+ * arm64 macOS zeroes x18 on context switches unless the thread opts into the
+ * custom x18 ABI (macOS 26.4+, requires com.apple.security.custom-x18-abi-toggle).
+ * x18 holds the TEB, so every thread running Windows code must opt in.
+ */
+void enable_custom_x18_abi(void)
+{
+    static void (*pset)(bool);
+    static bool (*pget)(void);
+    static int initialized;
+
+    if (!initialized)
+    {
+        pset = dlsym( RTLD_DEFAULT, "os_set_custom_x18_abi_enabled" );
+        pget = dlsym( RTLD_DEFAULT, "os_custom_x18_abi_enabled" );
+        if (!pset || !pget) ERR( "custom x18 ABI not available, x18 will not be preserved\n" );
+        initialized = 1;
+    }
+    if (pset && pget && !pget()) pset( true );
+}
+#endif
 
 
 /***********************************************************************

@@ -119,6 +119,7 @@ struct thread_data
     int          alert_fd;          /* inproc sync fd for user apc alerts */
     DWORD        tid;               /* thread id */
     BOOL         allow_writes;      /* ThreadAllowWrites flags */
+    BOOL         deferred_alert;    /* a wait inside the x86 emulator took an alert of the x86 code */
     BOOL         suspend;           /* suspend on startup */
     BOOL         filesys_redir;     /* WOW64_TLS_FILESYSREDIR before the TEB is created */
     pthread_t    pthread_id;        /* pthread thread id */
@@ -355,6 +356,11 @@ extern void signal_free_thread( TEB *teb );
 extern void signal_disable_syscall_dispatch(void);
 extern void signal_init_process( TEB *teb );
 extern void DECLSPEC_NORETURN signal_start_thread( PRTL_THREAD_START_ROUTINE entry, void *arg, TEB *teb );
+#if defined(__APPLE__) && defined(__aarch64__)
+extern void enable_custom_x18_abi(void);
+#else
+static inline void enable_custom_x18_abi(void) {}
+#endif
 extern SYSTEM_SERVICE_TABLE KeServiceDescriptorTable[4];
 extern void __wine_syscall_dispatcher(void);
 extern void __wine_syscall_dispatcher_return(void);
