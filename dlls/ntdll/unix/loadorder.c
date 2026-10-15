@@ -311,6 +311,26 @@ static void init_load_order(void)
     /* note: we don't free the string because the stored module names point inside it */
 }
 
+/***************************************************************************
+ *	add_load_order_override  (ntdll.so)
+ *
+ * CW Hack 24067: called by compatdb.so to add a WINEDLLOVERRIDES style entry.
+ */
+DECLSPEC_EXPORT void add_load_order_override( const WCHAR *entry )
+{
+    WCHAR *dup;
+
+    if (!init_done) init_load_order();
+
+    dup = calloc( wcslen(entry) + 1, sizeof(WCHAR) );
+    if (!dup) return;
+    wcscpy( dup, entry );
+
+    add_load_order_set( dup );
+    if (env_list.count)
+        qsort( env_list.order, env_list.count, sizeof(env_list.order[0]), cmp_sort_func );
+}
+
 
 /***************************************************************************
  *	get_env_load_order
