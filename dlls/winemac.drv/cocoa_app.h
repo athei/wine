@@ -77,6 +77,9 @@ enum {
     NSMutableDictionary* originalDisplayModes;
     NSMutableDictionary* latentDisplayModes;
     BOOL displaysCapturedForFullscreen;
+    BOOL displaysTemporarilyUncapturedForDialog;
+    BOOL temporarilyIgnoreResignEventsForDialog;
+    unsigned long dialogDeactivationSerial;
 
     NSArray*    cursorFrames;
     int         cursorFrame;
@@ -104,6 +107,7 @@ enum {
 @property (nonatomic) CGEventSourceKeyboardType keyboardType;
 @property (readonly, copy, nonatomic) NSEvent* lastFlagsChanged;
 @property (readonly, nonatomic) BOOL areDisplaysCaptured;
+@property (readonly, nonatomic) BOOL temporarilyIgnoreResignEventsForDialog;
 
 @property (readonly) BOOL clippingCursor;
 @property (nonatomic) NSTimeInterval lastSetCursorPositionTime;
