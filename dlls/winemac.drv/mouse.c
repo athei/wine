@@ -127,6 +127,7 @@ static void send_mouse_input(HWND hwnd, WineWindow *cocoa_window, UINT flags, in
                              DWORD mouse_data, BOOL drag, unsigned long time)
 {
     INPUT input;
+    BOOL covered = macdrv_gcmouse_covers_movement(time);
 
     input.type              = INPUT_MOUSE;
     input.mi.dx             = x;
@@ -136,7 +137,28 @@ static void send_mouse_input(HWND hwnd, WineWindow *cocoa_window, UINT flags, in
     input.mi.time           = time;
     input.mi.dwExtraInfo    = 0;
 
-    NtUserSendHardwareInput(hwnd, 0, &input, 0);
+    /* win32u would send the raw frames it holds along with this input, and
+       without SEND_HWMSG_RAWINPUT the server drops them. */
+    if (!covered) macdrv_flush_raw_mouse_input();
+
+    /* While a GameController mouse reports the movement, MOUSE_MOVED_RAW
+       carries its raw input, and this input only gives raw input for buttons
+       and the wheel. */
+    NtUserSendHardwareInput(hwnd, covered ? SEND_HWMSG_RAWINPUT : 0, &input, 0);
+}
+
+
+/***********************************************************************
+ *              macdrv_flush_raw_mouse_input
+ *
+ * Send the raw frames of MOUSE_MOVED_RAW events that win32u accumulated.
+ * When there are none, win32u returns without a server call.
+ */
+void macdrv_flush_raw_mouse_input(void)
+{
+    static const INPUT flush = { .type = INPUT_MOUSE, .mi.dwFlags = MOUSEEVENTF_MOVE_NOCOALESCE };
+
+    if (use_gcmouse) NtUserSendHardwareInput(NULL, SEND_HWMSG_RAWINPUT, &flush, 0);
 }
 
 
@@ -717,12 +739,37 @@ static BOOL get_icon_info(HICON handle, ICONINFOEXW *ret)
 
 
 /***********************************************************************
+ *              get_cursor_scale
+ *
+ * Return the factor by which a window is DPI virtualized: its monitor's
+ * effective DPI divided by the window's own DPI.  This is 2 for a
+ * DPI-unaware window on a 192 DPI monitor and 1 for a DPI-aware window.
+ * Scaling the cursor shown over the window by the same factor keeps it in
+ * proportion to the contents.  The stretch of an emulated display mode is
+ * left out on purpose, so a cursor in an emulated mode keeps its size.
+ */
+static CGFloat get_cursor_scale(HWND hwnd)
+{
+    UINT dpi, monitor_dpi;
+    CGFloat scale;
+
+    if (!hwnd || !(dpi = NtUserGetDpiForWindow(hwnd))) return 1;
+    if (!(monitor_dpi = NtUserGetWinMonitorDpi(hwnd, MDT_EFFECTIVE_DPI))) return 1;
+
+    scale = (CGFloat)monitor_dpi / dpi;
+    TRACE("hwnd %p dpi %u monitor_dpi %u scale %g\n", hwnd, dpi, monitor_dpi, scale);
+    return min(max(scale, 1), 8);
+}
+
+
+/***********************************************************************
  *              SetCursor (MACDRV.@)
  */
 void macdrv_SetCursor(HWND hwnd, HCURSOR cursor)
 {
     CFStringRef cursor_name = NULL;
     CFArrayRef cursor_frames = NULL;
+    CGFloat scale = 1;
 
     TRACE("%p %p\n", hwnd, cursor);
 
@@ -802,8 +849,13 @@ void macdrv_SetCursor(HWND hwnd, HCURSOR cursor)
     }
 
 done:
-    TRACE("setting cursor with cursor_name %s cursor_frames %p\n", debugstr_cf(cursor_name), cursor_frames);
-    macdrv_set_cursor(cursor_name, cursor_frames);
+    /* The cached frames hold the bitmaps at their own size.  The scale is
+       applied on the Cocoa side, so the same frames serve windows with
+       different scaling. */
+    if (cursor_frames) scale = get_cursor_scale(hwnd);
+    TRACE("setting cursor with cursor_name %s cursor_frames %p scale %g\n", debugstr_cf(cursor_name),
+          cursor_frames, scale);
+    macdrv_set_cursor(cursor_name, cursor_frames, scale);
     if (cursor_name) CFRelease(cursor_name);
     if (cursor_frames) CFRelease(cursor_frames);
 }
@@ -890,6 +942,31 @@ void macdrv_mouse_moved(HWND hwnd, const macdrv_event *event)
 
     send_mouse_input(hwnd, event->window, flags, event->mouse_moved.x, event->mouse_moved.y,
                      0, event->mouse_moved.drag, event->mouse_moved.time_ms);
+}
+
+
+/***********************************************************************
+ *              macdrv_mouse_moved_raw
+ *
+ * Handler for MOUSE_MOVED_RAW events, the movement a GameController mouse
+ * reports.  It only gives raw input; the cursor follows the mouse move
+ * events.  win32u accumulates the frames until macdrv_ProcessEvents flushes
+ * them.
+ */
+void macdrv_mouse_moved_raw(HWND hwnd, const macdrv_event *event)
+{
+    struct raw_mouse raw = { .count = 1 };
+    INPUT input = { .type = INPUT_MOUSE };
+
+    TRACE("win %p/%p raw (%d,%d) time %lu (%lu ticks ago)\n", hwnd, event->window,
+          event->mouse_moved.x, event->mouse_moved.y, event->mouse_moved.time_ms,
+          (NtGetTickCount() - event->mouse_moved.time_ms));
+
+    raw.data[0].x = event->mouse_moved.x;
+    raw.data[0].y = event->mouse_moved.y;
+    input.mi.time = event->mouse_moved.time_ms;
+
+    NtUserSendHardwareInput(hwnd, SEND_HWMSG_RAWINPUT, &input, (LPARAM)&raw);
 }
 
 

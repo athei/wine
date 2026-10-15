@@ -35,6 +35,8 @@
 
     + (NSView*) dummyView;
     - (void) wine_updateBackingSize:(const CGSize*)size;
+    - (void) wine_recreateSurfaceForView:(NSView*)view;
+    - (void) wine_superClearDrawable;
 
 @end
 
@@ -84,18 +86,44 @@
             macdrv_set_view_backing_size((WineContentView *)self.view, view_backing);
 
             NSView* save = self.view;
+            if ([NSThread isMainThread])
+                [self wine_recreateSurfaceForView:save];
+            else OnMainThread(^{
+                [self wine_recreateSurfaceForView:save];
+            });
+        }
+    }
+
+    /* A view has one GL surface, which all contexts attached to it draw to.
+       Clearing the drawable of an attached context destroys that surface,
+       and setting the view again creates a new one, but the other contexts
+       attached to the view still refer to the destroyed surface's window.
+       When one of them flushes, SkyLight looks that window up and
+       dereferences the result without checking it.  Keep the other contexts
+       locked while the surface changes, so that none of them flushes in
+       between, and point them at the new surface. */
+    - (void) wine_recreateSurfaceForView:(NSView*)view
+    {
+        NSArray* contexts = [(NSArray*)macdrv_copy_view_opengl_contexts((WineContentView *)view) autorelease];
+        NSMutableArray* others = [NSMutableArray array];
+
+        for (WineOpenGLContext* context in contexts)
+        {
+            if (context != self && [context view] == view && ![others containsObject:context])
+                [others addObject:context];
+        }
+
+        for (WineOpenGLContext* context in others)
+            CGLLockContext(context.CGLContextObj);
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
-            if ([NSThread isMainThread])
-            {
-                [super clearDrawable];
-                [super setView:save];
-            }
-            else OnMainThread(^{
-                [super clearDrawable];
-                [super setView:save];
-            });
+        [super clearDrawable];
+        [super setView:view];
 #pragma clang diagnostic pop
+        for (WineOpenGLContext* context in others)
+        {
+            [context update];
+            CGLUnlockContext(context.CGLContextObj);
         }
     }
 
@@ -146,14 +174,28 @@
         [oldView release];
     }
 
+    - (void) wine_superClearDrawable
+    {
+        [super clearDrawable];
+    }
+
     - (void) clearDrawable
     {
         NSView* oldView = [self view];
         if ([NSThread isMainThread])
             [super clearDrawable];
-        else OnMainThread(^{
-            [super clearDrawable];
-        });
+        else
+        {
+            /* -[NSOpenGLContext dealloc] calls this method.  A block that
+               captured self would be released on the main thread only after
+               OnMainThread() has returned and the context has been freed, and
+               that release would reach the freed context.  Capture it without
+               a retain. */
+            __block WineOpenGLContext* context = self;
+            OnMainThread(^{
+                [context wine_superClearDrawable];
+            });
+        }
         [oldView release];
 
         [self wine_updateBackingSize:NULL];

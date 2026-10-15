@@ -63,6 +63,7 @@ enum {
 @end
 
 void OnMainThread(dispatch_block_t block);
+void OnMainThreadWithoutQueries(dispatch_block_t block);
 
 macdrv_event* macdrv_create_event(int type, WineWindow* window);
 macdrv_event* macdrv_retain_event(macdrv_event *event);
