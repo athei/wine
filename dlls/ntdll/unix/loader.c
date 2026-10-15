@@ -292,6 +292,31 @@ static WORD get_alt_machine( WORD machine )
     }
 }
 
+/***********************************************************************
+ *           prepend_dll_path  (ntdll.so)
+ *
+ * CW Hack 24067: called by compatdb.so to search a directory for builtin
+ * DLLs before the others.
+ */
+DECLSPEC_EXPORT void prepend_dll_path( const char *path )
+{
+    unsigned int i, count;
+    const char **new_dll_paths;
+    size_t path_len = strlen( path );
+
+    for (count = 0; dll_paths[count]; count++)
+        ;
+
+    if (!(new_dll_paths = calloc( count + 2, sizeof(*new_dll_paths) ))) return;
+    new_dll_paths[0] = path;
+    for (i = 0; dll_paths[i]; i++)
+        new_dll_paths[i + 1] = dll_paths[i];
+
+    free( dll_paths );
+    dll_paths = new_dll_paths;
+    dll_path_maxlen = max( dll_path_maxlen, path_len );
+}
+
 static void set_dll_path(void)
 {
     char *p, *path = getenv( "WINEDLLPATH" );
@@ -1870,6 +1895,22 @@ static ULONG_PTR get_image_address(void)
 }
 
 /***********************************************************************
+ *           load_compatdb
+ *
+ * CW Hack 24067: load compatdb.so, whose initializer applies the rules that
+ * match the process, before the first PE code runs.
+ */
+static void load_compatdb(void)
+{
+    char *name;
+
+    if (asprintf( &name, "%s/compatdb.so", ntdll_dir ) == -1) return;
+    if (!dlopen( name, RTLD_LOCAL | RTLD_LAZY ))
+        WARN( "error loading compatdb.so: %s\n", dlerror() );
+    free( name );
+}
+
+/***********************************************************************
  *           start_main_thread
  */
 static void start_main_thread(void)
@@ -1889,6 +1930,7 @@ static void start_main_thread(void)
     load_ntdll();
     load_wow64_ntdll( main_image_info.Machine );
     load_apiset_dll();
+    load_compatdb();
     server_init_process_done();
 }
 
