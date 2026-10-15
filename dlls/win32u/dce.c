@@ -1596,7 +1596,13 @@ static HRGN send_ncpaint( HWND hwnd, HWND *child, UINT *flags )
                 if (style & WS_VSCROLL)
                     set_standard_scroll_painted( hwnd, SB_VERT, FALSE );
 
-                send_message( hwnd, WM_NCPAINT, (WPARAM)whole_rgn, 0 );
+                /* Don't wait for a window of another thread, which may be
+                 * hung. The region is deleted before such a window gets to
+                 * the message, so it paints its whole frame instead. */
+                if (is_current_thread_window( hwnd ))
+                    send_message( hwnd, WM_NCPAINT, (WPARAM)whole_rgn, 0 );
+                else
+                    send_notify_message( hwnd, WM_NCPAINT, 1, 0, FALSE );
             }
             if (whole_rgn > (HRGN)1) NtGdiDeleteObjectApp( whole_rgn );
         }
@@ -1631,9 +1637,15 @@ static BOOL send_erase( HWND hwnd, UINT flags, HRGN client_rgn,
 
             if (flags & UPDATE_ERASE)
             {
-                /* don't erase if the clip box is empty */
+                /* don't erase if the clip box is empty, and don't wait long
+                 * for a window of another thread, which may be hung */
                 if (type != NULLREGION)
-                    need_erase = !send_message( hwnd, WM_ERASEBKGND, (WPARAM)hdc, 0 );
+                {
+                    need_erase = !send_message_timeout( hwnd, WM_ERASEBKGND, (WPARAM)hdc, 0,
+                                                        SMTO_ABORTIFHUNG, 1000, FALSE );
+                    if (need_erase && RtlGetLastWin32Error() == ERROR_TIMEOUT)
+                        ERR( "WM_ERASEBKGND to %p timed out\n", hwnd );
+                }
             }
             if (!hdc_ret) release_dc( hwnd, hdc, TRUE );
         }
