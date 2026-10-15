@@ -121,11 +121,15 @@ static BOOL macdrv_surface_flush(struct window_surface *window_surface, const RE
 
     /* The window may have been previously drawn with client_surface, for example, when the window
      * had been a target for a D3D swapchain. Hide the client_view so that it doesn't occlude the
-     * content in the window_surface */
+     * content in the window_surface. Keep it shown while DXMT or mtld3d still present through it:
+     * they show it again only on their next present, so the window would flash. */
     if ((data = get_win_data(window_surface->hwnd)))
     {
-        if (data->client_view)
+        if (is_d3dmetal_client_view_presenting(data))
+            TRACE("keeping client view %p of %p shown\n", data->client_view, window_surface->hwnd);
+        else if (data->client_view)
         {
+            TRACE("hiding client view %p of %p\n", data->client_view, window_surface->hwnd);
             macdrv_set_view_hidden(data->client_view, TRUE);
             data->client_view = NULL;
         }
