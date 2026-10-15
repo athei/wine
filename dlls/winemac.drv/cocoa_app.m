@@ -33,6 +33,11 @@ WINE_DEFAULT_DEBUG_CHANNEL(macdrv);
 
 static NSString* const WineAppWaitQueryResponseMode = @"WineAppWaitQueryResponseMode";
 
+// Posted in this process by winecoreaudio.drv around the system prompt for
+// microphone access.
+static NSString* const WineWillShowPermissionDialogNotification = @"WineWillShowPermissionDialogNotification";
+static NSString* const WineDidShowPermissionDialogNotification = @"WineDidShowPermissionDialogNotification";
+
 // Private notifications that are reliably dispatched when a window is moved by dragging its titlebar.
 // The object of the notification is the window being dragged.
 // Available in macOS 10.12+
@@ -118,6 +123,7 @@ static NSString* WineLocalizedString(unsigned int stringID)
 @implementation WineApplicationController
 
     @synthesize keyboardType, lastFlagsChanged;
+    @synthesize temporarilyIgnoreResignEventsForDialog;
     @synthesize applicationIcon;
     @synthesize cursorFrames, cursorTimer, cursor;
     @synthesize mouseCaptureWindow;
@@ -1186,6 +1192,30 @@ static NSString* WineLocalizedString(unsigned int stringID)
         self.applicationIcon = nsimage;
     }
 
+    /* Release captured displays and restore the system's display modes,
+       remembering ours to set again when the application is next activated.
+       Return whether any display was captured. */
+    - (BOOL) releaseCapturedDisplays
+    {
+        NSNumber* displayID;
+
+        if (![originalDisplayModes count] && !displaysCapturedForFullscreen)
+            return FALSE;
+
+        for (displayID in originalDisplayModes)
+        {
+            CGDisplayModeRef mode = CGDisplayCopyDisplayMode([displayID unsignedIntValue]);
+            [latentDisplayModes setObject:(id)mode forKey:displayID];
+            CGDisplayModeRelease(mode);
+        }
+
+        CGRestorePermanentDisplayConfiguration();
+        CGReleaseAllDisplays();
+        [originalDisplayModes removeAllObjects];
+        displaysCapturedForFullscreen = FALSE;
+        return TRUE;
+    }
+
     - (void) handleCommandTab
     {
         if ([NSApp isActive])
@@ -1194,21 +1224,7 @@ static NSString* WineLocalizedString(unsigned int stringID)
             NSRunningApplication* app;
             NSRunningApplication* otherValidApp = nil;
 
-            if ([originalDisplayModes count] || displaysCapturedForFullscreen)
-            {
-                NSNumber* displayID;
-                for (displayID in originalDisplayModes)
-                {
-                    CGDisplayModeRef mode = CGDisplayCopyDisplayMode([displayID unsignedIntValue]);
-                    [latentDisplayModes setObject:(id)mode forKey:displayID];
-                    CGDisplayModeRelease(mode);
-                }
-
-                CGRestorePermanentDisplayConfiguration();
-                CGReleaseAllDisplays();
-                [originalDisplayModes removeAllObjects];
-                displaysCapturedForFullscreen = FALSE;
-            }
+            [self releaseCapturedDisplays];
 
             for (app in [[NSWorkspace sharedWorkspace] runningApplications])
             {
@@ -2027,6 +2043,58 @@ static NSString* WineLocalizedString(unsigned int stringID)
                     name:(NSString*)kTISNotifyEnabledKeyboardInputSourcesChanged
                   object:nil];
 
+        [nc addObserverForName:WineWillShowPermissionDialogNotification
+                        object:nil
+                         queue:[NSOperationQueue mainQueue]
+                    usingBlock:^(NSNotification *note){
+            /* The system prompt is about to take the focus. Let it show over
+               captured displays, and don't tell Windows that the application
+               lost the focus to it, or a fullscreen game may minimize. */
+            if ([NSApp isActive])
+            {
+                if ([self releaseCapturedDisplays])
+                    displaysTemporarilyUncapturedForDialog = TRUE;
+                temporarilyIgnoreResignEventsForDialog = TRUE;
+            }
+        }];
+
+        [nc addObserverForName:WineDidShowPermissionDialogNotification
+                        object:nil
+                         queue:[NSOperationQueue mainQueue]
+                    usingBlock:^(NSNotification *note){
+            BOOL active = [NSApp isActive];
+
+            /* If the application is not active, leave the remembered display
+               modes for its next activation. */
+            if (displaysTemporarilyUncapturedForDialog)
+            {
+                if (active)
+                    [self applicationDidBecomeActive:nil];
+                displaysTemporarilyUncapturedForDialog = FALSE;
+            }
+            if (temporarilyIgnoreResignEventsForDialog)
+            {
+                temporarilyIgnoreResignEventsForDialog = FALSE;
+
+                /* The application may only be inactive because AppKit has
+                   not yet processed its reactivation after the prompt closed,
+                   which nothing orders against this notification. Report the
+                   deactivation that was held back only if the application is
+                   still inactive a moment later and was not activated in
+                   between; an activation bumps the serial. */
+                if (!active)
+                {
+                    unsigned long serial = ++dialogDeactivationSerial;
+
+                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 300 * NSEC_PER_MSEC),
+                                   dispatch_get_main_queue(), ^{
+                        if (serial == dialogDeactivationSerial && ![NSApp isActive])
+                            [self postAppDeactivated];
+                    });
+                }
+            }
+        }];
+
         if ([NSApplication instancesRespondToSelector:@selector(yieldActivationToApplication:)])
         {
             /* App activation cooperation, starting in macOS 14 Sonoma. */
@@ -2329,12 +2397,10 @@ static NSString* WineLocalizedString(unsigned int stringID)
         forceNextMouseMoveAbsolute = TRUE;
     }
 
-    - (void)applicationDidResignActive:(NSNotification *)notification
+    - (void) postAppDeactivated
     {
         macdrv_event* event;
         WineEventQueue* queue;
-
-        [self invalidateGotFocusEvents];
 
         event = macdrv_create_event(APP_DEACTIVATED, nil);
 
@@ -2344,6 +2410,14 @@ static NSString* WineLocalizedString(unsigned int stringID)
         [eventQueuesLock unlock];
 
         macdrv_release_event(event);
+    }
+
+    - (void)applicationDidResignActive:(NSNotification *)notification
+    {
+        [self invalidateGotFocusEvents];
+
+        if (!temporarilyIgnoreResignEventsForDialog)
+            [self postAppDeactivated];
 
         [self releaseMouseCapture];
     }
@@ -2408,6 +2482,9 @@ static NSString* WineLocalizedString(unsigned int stringID)
     {
         macdrv_event* event = macdrv_create_event(APP_ACTIVATED, nil);
         event->deliver = 1;
+
+        /* cancel a pending deactivation from the permission prompt */
+        dialogDeactivationSerial++;
 
         [eventQueuesLock lock];
         for (WineEventQueue* queue in eventQueues)
