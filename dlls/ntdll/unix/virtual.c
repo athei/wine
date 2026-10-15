@@ -3648,6 +3648,13 @@ static void set_large_address_space(void)
         return;
     }
 
+#if defined(__APPLE__) && defined(__aarch64__)
+    /* The loader reserves no low 8GB as the preloader does, only the space below 4GB and
+     * below the loader, so without the top-down area the top-down 64-bit allocations of a
+     * WoW64 process would go into the 32-bit address space. */
+    reserve_area( (void *)0x7ff000000000, (void *)0x7ff600000000 );
+#endif
+
     if (main_image_info.Machine == IMAGE_FILE_MACHINE_I386)
     {
         /* reserve the DOS area, and make it accessible (except the low 64K)

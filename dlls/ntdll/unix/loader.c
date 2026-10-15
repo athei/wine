@@ -452,6 +452,29 @@ static void preloader_exec( char **argv )
     execv( argv[0], argv );
     free( argv[0] );
 #endif
+#if defined(__APPLE__) && defined(__aarch64__)
+    /* The loader execs itself again to get 4K pages (see loader/main.c), which a plain
+     * exec drops. When this process has them, it runs from an entitled loader, and the
+     * new loader is the same binary, so exec it with them to save that exec. The
+     * exception would be a loader from get_alternate_wineloader, which arm64 does not
+     * ship. A plain exec would not help when this fails: the loader would retry the same
+     * exec with the same binary. So fail like execv, with errno set. */
+    if (sysconf( _SC_PAGESIZE ) == 0x1000)
+    {
+        posix_spawnattr_t attr;
+        int err;
+
+        if (!(err = posix_spawnattr_init( &attr )))
+        {
+            if (!(err = posix_spawnattr_setflags( &attr, POSIX_SPAWN_SETEXEC )) &&
+                !(err = posix_spawnattr_set_4k_page_size_np( &attr )))
+                err = posix_spawn( NULL, argv[1], NULL, &attr, argv + 1, environ );
+            posix_spawnattr_destroy( &attr );
+        }
+        errno = err;
+        return;
+    }
+#endif
     execv( argv[1], argv + 1 );
 }
 
