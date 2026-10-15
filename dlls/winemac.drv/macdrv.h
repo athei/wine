@@ -242,6 +242,7 @@ struct macdrv_win_data
     unsigned int        per_pixel_alpha : 1;    /* is window using per-pixel alpha? */
     unsigned int        minimized : 1;          /* is window minimized? */
     unsigned int        fullscreen : 1;         /* is the window visible rect fullscreen? (unrelated to native AppKit/Cocoa fullscreen) */
+    CFMutableArrayRef   d3dmetal_client_surfaces; /* client surfaces created through macdrv_functions */
 };
 
 struct macdrv_client_surface
@@ -270,6 +271,7 @@ extern void macdrv_window_lost_focus(HWND hwnd, const macdrv_event *event);
 extern void macdrv_app_activated(void);
 extern void macdrv_app_deactivated(void);
 extern void macdrv_app_quit_requested(const macdrv_event *event);
+extern void macdrv_client_surface_presented(const macdrv_event *event);
 extern void macdrv_window_maximize_requested(HWND hwnd);
 extern void macdrv_window_minimize_requested(HWND hwnd);
 extern void macdrv_window_did_minimize(HWND hwnd);
