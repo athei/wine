@@ -4230,6 +4230,7 @@ enum inproc_sync_type
 @REPLY
     int           type;         /* inproc sync type */
     unsigned int access;        /* handle access rights */
+    unsigned int shm_idx;       /* object index for index-based implementations (msync) */
 @END
 
 
