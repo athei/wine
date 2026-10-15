@@ -4364,6 +4364,30 @@ static void set_large_address_space(void)
 
 
 /***********************************************************************
+ *           virtual_recheck_large_address_space
+ *
+ * Give a 32-bit process the 4GB address space if compatdb.so asked for it,
+ * after set_large_address_space made the first decision from the executable
+ * alone. The limit only grows: the 32-bit stack and the apiset map are already
+ * placed below 2GB, which stays valid either way.
+ */
+void virtual_recheck_large_address_space(void)
+{
+    sigset_t sigset;
+
+    if (!is_win64 || !is_wow64() || user_space_wow_limit == limit_4g - 1) return;
+    if (get_compat_large_address_aware() != 1) return;
+
+    TRACE( "enabling the large address space\n" );
+    server_enter_uninterrupted_section( &virtual_mutex, &sigset );
+    user_space_wow_limit = limit_4g - 1;
+    /* reserve space for top-down allocations, as set_large_address_space does */
+    reserve_area( (void *)0xfff00000, (void *)0xffff0000 );
+    server_leave_uninterrupted_section( &virtual_mutex, &sigset );
+}
+
+
+/***********************************************************************
  *           virtual_alloc_first_thread_data
  */
 struct thread_data *virtual_alloc_first_thread_data(void)

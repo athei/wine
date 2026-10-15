@@ -241,6 +241,7 @@ extern void *create_startup_info( const UNICODE_STRING *nt_image, ULONG process_
                                   const RTL_USER_PROCESS_PARAMETERS *params,
                                   const struct pe_image_info *pe_info, DWORD *info_size );
 extern char *get_alternate_wineloader( WORD machine );
+extern int get_compat_large_address_aware(void);
 extern NTSTATUS exec_wineloader( char **argv, int socketfd, const struct pe_image_info *pe_info );
 extern NTSTATUS load_builtin( struct pe_mapping_info *pe_mapping, USHORT machine,
                               SECTION_IMAGE_INFORMATION *info, void **module, SIZE_T *size,
@@ -319,6 +320,7 @@ extern NTSTATUS virtual_create_builtin_view( void *module, const UNICODE_STRING 
 extern NTSTATUS virtual_relocate_module( void *module );
 extern struct thread_data *virtual_alloc_first_thread_data(void);
 extern void virtual_alloc_first_teb(void);
+extern void virtual_recheck_large_address_space(void);
 extern NTSTATUS virtual_alloc_teb( struct thread_data *data );
 struct thread_data *virtual_alloc_thread_data(void);
 extern void virtual_free_thread_data( struct thread_data *data );

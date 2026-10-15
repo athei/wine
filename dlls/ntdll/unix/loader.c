@@ -317,6 +317,50 @@ DECLSPEC_EXPORT void prepend_dll_path( const char *path )
     dll_path_maxlen = max( dll_path_maxlen, path_len );
 }
 
+/* CW Hack 24067: process DPI awareness chosen by compatdb.so: -1 unset, 0 unaware,
+ * 1 aware; any other value is treated as unset */
+static int compat_dpi_awareness = -1;
+
+/***********************************************************************
+ *           set_compat_dpi_awareness  (ntdll.so)
+ *
+ * CW Hack 24067: called by compatdb.so.
+ */
+DECLSPEC_EXPORT void set_compat_dpi_awareness( int aware )
+{
+    compat_dpi_awareness = aware;
+}
+
+/***********************************************************************
+ *           ntdll_get_compat_dpi_awareness  (ntdll.so)
+ *
+ * CW Hack 24067: read by win32u.
+ */
+int ntdll_get_compat_dpi_awareness(void)
+{
+    return compat_dpi_awareness;
+}
+
+/* CW Hack 24067: large address awareness of a 32-bit process chosen by
+ * compatdb.so: -1 unset, 0 do not force it, 1 force it. Without forcing, the
+ * IMAGE_FILE_LARGE_ADDRESS_AWARE flag of the executable decides as before. */
+static int compat_large_address_aware = -1;
+
+/***********************************************************************
+ *           set_compat_large_address_aware  (ntdll.so)
+ *
+ * CW Hack 24067: called by compatdb.so.
+ */
+DECLSPEC_EXPORT void set_compat_large_address_aware( int value )
+{
+    compat_large_address_aware = value;
+}
+
+int get_compat_large_address_aware(void)
+{
+    return compat_large_address_aware;
+}
+
 static void set_dll_path(void)
 {
     char *p, *path = getenv( "WINEDLLPATH" );
@@ -423,6 +467,33 @@ static void init_paths(void)
         bin_dir = build_relative_path( dll_dir, LIBDIR "/wine", BINDIR );
         data_dir = build_relative_path( dll_dir, LIBDIR "/wine", DATADIR "/wine" );
         wineloader = build_path( ntdll_dir, "wine" );
+#ifdef __APPLE__
+        {
+            /* Start processes through the loader inside wine.app when the installation
+             * has one, not through the link to it next to ntdll.so: LaunchServices only
+             * gives a process the identity of the bundle its executable path is in. */
+            char *bundle_loader = build_path( ntdll_dir, "wine.app/Contents/MacOS/wine" );
+
+            if (!access( bundle_loader, X_OK ))
+            {
+                free( (char *)wineloader );
+                wineloader = bundle_loader;
+            }
+            else free( bundle_loader );
+        }
+        if (!getenv( "VK_DRIVER_FILES" ) && !getenv( "VK_ICD_FILENAMES" ) &&
+            !getenv( "VK_ADD_DRIVER_FILES" ))
+        {
+            /* Point the Vulkan loader at the drivers the installation bundles,
+             * unless the caller names its own. The loader ignores
+             * VK_ADD_DRIVER_FILES once VK_DRIVER_FILES is set. */
+            char *icd_dir = build_relative_path( dll_dir, LIBDIR "/wine", DATADIR "/vulkan/icd.d" );
+            struct stat st;
+
+            if (!stat( icd_dir, &st ) && S_ISDIR( st.st_mode )) setenv( "VK_DRIVER_FILES", icd_dir, 1 );
+            free( icd_dir );
+        }
+#endif
     }
 
     set_dll_path();
@@ -457,6 +528,17 @@ char *get_alternate_wineloader( WORD machine )
     else if (alt_build_dir)
         asprintf( &ret, "%s/loader/wine", alt_build_dir );
 
+    /* Installations without a 32-bit Unix loader (wow64-only builds) have no
+     * i386-unix directory, so the constructed path may not exist. Callers
+     * treat a non-NULL return as proof that another loader must run the
+     * image: loader_exec execs it and env.c falls back to start.exe, which
+     * relaunches the main exe in a detached process. Verify the loader is
+     * actually there so those callers behave as if WINEARCH=wow64 was set. */
+    if (ret && access( ret, X_OK ))
+    {
+        free( ret );
+        ret = NULL;
+    }
     return ret;
 }
 
@@ -1931,6 +2013,9 @@ static void start_main_thread(void)
     load_wow64_ntdll( main_image_info.Machine );
     load_apiset_dll();
     load_compatdb();
+    /* compatdb.so may have forced large address awareness after
+     * virtual_alloc_first_teb made the first decision. */
+    virtual_recheck_large_address_space();
     server_init_process_done();
 }
 

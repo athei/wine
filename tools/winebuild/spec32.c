@@ -909,6 +909,7 @@ static struct
     unsigned int    file_align;
     unsigned int    sec_count;
     unsigned int    exp_count;
+    unsigned int    reloc_rva;
     struct dir_data dir[16];
     struct sec_data sec[8];
     struct exp_data exp[8];
@@ -1163,8 +1164,18 @@ static void output_pe_file( DLLSPEC *spec, const char signature[32] )
     /* .reloc section */
     if (code_size)
     {
-        put_dword( 0 );  /* VirtualAddress */
-        put_dword( 0 );  /* Size */
+        if (pe.reloc_rva)  /* a single 64-bit address */
+        {
+            put_dword( pe.reloc_rva & ~0xfff );  /* VirtualAddress */
+            put_dword( 12 );                     /* Size */
+            put_word( 0xa000 | (pe.reloc_rva & 0xfff) );  /* IMAGE_REL_BASED_DIR64 */
+            put_word( 0 );                       /* IMAGE_REL_BASED_ABSOLUTE padding */
+        }
+        else
+        {
+            put_dword( 0 );  /* VirtualAddress */
+            put_dword( 0 );  /* Size */
+        }
         flush_output_to_section( ".reloc", 5 /* IMAGE_DIRECTORY_ENTRY_BASERELOC */,
                                  0x42000040 /* CNT_INITIALIZED_DATA|MEM_DISCARDABLE|MEM_READ */ );
     }
@@ -1364,6 +1375,27 @@ void output_fake_module( DLLSPEC *spec )
         for (i = 0; i < pe.exp_count; i++) put_data( pe.exp[i].name, strlen(pe.exp[i].name) + 1 );
         flush_output_to_section( ".edata", 0 /* IMAGE_DIRECTORY_ENTRY_EXPORT */,
                                  0x40000040 /* CNT_INITIALIZED_DATA|MEM_READ */ );
+    }
+
+    /* .rdata section: an ARM64X placeholder needs a load config pointing to
+     * ARM64EC metadata, so that ARM64EC processes accept it as a hybrid module */
+    if (target.cpu == CPU_ARM64 && native_arch == CPU_ARM64)
+    {
+        unsigned int cfg_rva = current_rva();
+        unsigned int cfg_size = 0x140;  /* sizeof(IMAGE_LOAD_CONFIG_DIRECTORY64) */
+
+        put_dword( cfg_size );        /* Size */
+        for (i = 4; i < 0xc8; i += 4) put_dword( 0 );
+        pe.reloc_rva = cfg_rva + output_buffer_pos;
+        put_dword( 0x80000000 + cfg_rva + cfg_size );  /* CHPEMetadataPointer, an address */
+        put_dword( 0x00000001 );                       /* relative to ImageBase */
+        for (i = 0xd0; i < cfg_size; i += 4) put_dword( 0 );
+
+        /* IMAGE_ARM64EC_METADATA, with no code map and no redirections */
+        put_dword( 2 );               /* Version */
+        for (i = 4; i < 0x74; i += 4) put_dword( 0 );
+        flush_output_to_section( ".rdata", -1, 0x40000040 /* CNT_INITIALIZED_DATA|MEM_READ */ );
+        set_dir( 10 /* IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG */, cfg_rva, cfg_size );
     }
 
     output_pe_file( spec, fakedll_signature );
