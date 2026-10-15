@@ -243,6 +243,12 @@ static inline BOOL stage_manager_enabled(void)
 
     WineMetalView *_metalView;
     NSMutableDictionary<NSNumber*, CALayerHost*>* _caLayerHosts;
+
+    /* The client surface whose cocoa view this is, for a surface created
+       through macdrv_functions. Read by WineMetalLayer, and by Metal layers
+       outside Wine (mtld3d) under this name, as on CrossOver. */
+@public
+    void *d3dmetal_client_surface;
 }
 
 @property (readonly, nonatomic) BOOL everHadGLContext;
@@ -821,6 +827,49 @@ static inline BOOL stage_manager_enabled(void)
 @end
 
 
+@interface WineMetalLayer : CAMetalLayer
+@end
+
+
+@implementation WineMetalLayer
+
+    /* Extend [CAMetalLayer nextDrawable] so that a Metal layer outside Wine
+     * (DXMT) that draws into a client surface created through
+     * macdrv_functions has client_surface_present() called for it: that
+     * sizes the surface's cocoa view to the client rect and shows it.
+     * The layer's delegate is the WineMetalView backed by it, and that view's
+     * superview is the client surface's cocoa view.
+     */
+    - (id<CAMetalDrawable>) nextDrawable
+    {
+        if ([self.delegate isKindOfClass:[WineMetalView class]])
+        {
+            NSView* view = (NSView*)self.delegate;
+            NSView* superview = view.superview;
+            NSWindow* window = view.window;
+
+            if ([superview isKindOfClass:[WineContentView class]] &&
+                [window isKindOfClass:[WineWindow class]])
+            {
+                void *client_surface = ((WineContentView*)superview)->d3dmetal_client_surface;
+                if (client_surface)
+                {
+                    macdrv_event* event;
+
+                    event = macdrv_create_event(CLIENT_SURFACE_PRESENTED, (WineWindow*)window);
+                    event->client_surface_presented.client_surface = client_surface;
+                    [[(WineWindow*)window queue] postEvent:event];
+                    macdrv_release_event(event);
+                }
+            }
+        }
+
+        return [super nextDrawable];
+    }
+
+@end
+
+
 @implementation WineMetalView
 
     - (id) initWithFrame:(NSRect)frame device:(id<MTLDevice>)device
@@ -849,7 +898,7 @@ static inline BOOL stage_manager_enabled(void)
 
     - (CALayer*) makeBackingLayer
     {
-        CAMetalLayer *layer = [CAMetalLayer layer];
+        CAMetalLayer *layer = [WineMetalLayer layer];
         layer.device = _device;
         layer.framebufferOnly = YES;
         layer.magnificationFilter = kCAFilterNearest;
@@ -3841,6 +3890,26 @@ void macdrv_set_view_backing_size(WineContentView *view, const int backing_size[
 {
     if ([view isKindOfClass:[WineContentView class]])
         [view wine_setBackingSize:backing_size];
+}
+
+/***********************************************************************
+ *              macdrv_set_view_d3dmetal_client_surface
+ */
+void macdrv_set_view_d3dmetal_client_surface(WineContentView *view, void *client_surface)
+{
+    if ([view isKindOfClass:[WineContentView class]])
+        view->d3dmetal_client_surface = client_surface;
+}
+
+/***********************************************************************
+ *              macdrv_run_on_main_thread
+ *
+ * OnMainThread() for callers that see the block as a plain pointer, such as
+ * the macdrv_functions table.
+ */
+void macdrv_run_on_main_thread(void *block)
+{
+    OnMainThread((dispatch_block_t)block);
 }
 
 /***********************************************************************
