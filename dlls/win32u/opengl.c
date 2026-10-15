@@ -1586,6 +1586,7 @@ static BOOL egldrv_context_activate( struct opengl_context *context, struct open
 
     TRACE( "context %p, draw %s, read %s\n", context, debugstr_opengl_drawable( draw ), debugstr_opengl_drawable( read ) );
 
+    if (!context->host_context) return FALSE;
     return funcs->p_eglMakeCurrent( egl->display, draw ? draw->surface : EGL_NO_SURFACE, read ? read->surface : EGL_NO_SURFACE, context->host_context );
 }
 
@@ -1796,14 +1797,23 @@ done:
     free( devices );
 }
 
-static void init_egl_platforms( struct opengl_funcs *funcs, const struct opengl_driver_funcs *driver_funcs )
+static void init_egl_platforms( struct opengl_funcs *funcs, const struct opengl_driver_funcs **driver_funcs )
 {
-    if (!funcs->egl_handle || !driver_funcs->p_init_egl_platform) return;
+    if (!funcs->egl_handle || !(*driver_funcs)->p_init_egl_platform) return;
 
-    driver_funcs->p_init_egl_platform( &display_egl );
+    (*driver_funcs)->p_init_egl_platform( &display_egl );
     if (!display_egl.type) display_egl.display = funcs->p_eglGetDisplay( EGL_DEFAULT_DISPLAY );
 
-    init_egl_platform( &display_egl, funcs );
+    /* Without a display that initializes, EGL has no configs and no root
+     * context, which every other OpenGL call needs. There is no OpenGL then,
+     * as without libEGL. */
+    if (!init_egl_platform( &display_egl, funcs ))
+    {
+        WARN( "Failed to initialize the EGL display, OpenGL is disabled\n" );
+        display_egl.display = NULL;
+        *driver_funcs = &nulldrv_funcs;
+        return;
+    }
     init_egl_devices( funcs );
 }
 
@@ -1815,7 +1825,7 @@ static BOOL egl_init( const struct opengl_driver_funcs **driver_funcs )
     return FALSE;
 }
 
-static void init_egl_platforms( struct opengl_funcs *funcs, const struct opengl_driver_funcs *driver_funcs )
+static void init_egl_platforms( struct opengl_funcs *funcs, const struct opengl_driver_funcs **driver_funcs )
 {
 }
 
@@ -3474,7 +3484,7 @@ static void display_funcs_init(void)
 
     if ((status = user_driver->pOpenGLInit( WINE_OPENGL_DRIVER_VERSION, &display_funcs, &driver_funcs )))
         WARN( "Failed to initialize the driver OpenGL functions, status %#x\n", status );
-    init_egl_platforms( &display_funcs, driver_funcs );
+    init_egl_platforms( &display_funcs, &driver_funcs );
 
     formats_count = driver_funcs->p_init_pixel_formats( &onscreen_count );
     if (!(pixel_formats = malloc( formats_count * sizeof(*pixel_formats) ))) ERR( "Failed to allocate memory for pixel formats\n" );
