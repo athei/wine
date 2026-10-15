@@ -76,6 +76,7 @@
 #include "wine/server.h"
 #include "wine/debug.h"
 #include "unix_private.h"
+#include "msync.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(thread);
 WINE_DECLARE_DEBUG_CHANNEL(seh);
@@ -1116,7 +1117,8 @@ static void contexts_from_server( CONTEXT *context, struct context_data server_c
 static DECLSPEC_NORETURN void pthread_exit_wrapper( int status )
 {
     struct thread_data *data = get_thread_data();
-    close( data->alert_fd );
+    /* with msync, alert_fd is an msync object index, not a file descriptor */
+    if (!do_msync()) close( data->alert_fd );
     close( data->wait_fd[0] );
     close( data->wait_fd[1] );
     close( data->reply_fd );
@@ -1497,6 +1499,8 @@ NTSTATUS WINAPI PsCreateSystemThread( HANDLE *handle, ACCESS_MASK access, OBJECT
 void abort_thread( int status )
 {
     pthread_sigmask( SIG_BLOCK, &server_block_set, NULL );
+    /* also for the last thread: other processes may share the objects */
+    msync_abort_thread( get_thread_data() );
     if (InterlockedDecrement( &nb_threads ) <= 0) abort_process( status );
     pthread_exit_wrapper( status );
 }
