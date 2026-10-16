@@ -4236,6 +4236,7 @@ static void init_vulkan_format_info(struct wined3d_adapter *adapter, struct wine
             VK_CALL(vkGetPhysicalDeviceFormatProperties(vk_physical_device, vk_format, &properties));
         }
     }
+    format->vk_optimal_features = properties.optimalTilingFeatures;
 
     caps = 0;
     texture_flags = properties.linearTilingFeatures | properties.optimalTilingFeatures;
