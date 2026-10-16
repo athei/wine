@@ -75,6 +75,15 @@ WINE_DEFAULT_DEBUG_CHANNEL(process);
 
 static ULONG execute_flags = MEM_EXECUTE_OPTION_DISABLE;
 
+/* When compatdb.so asks for it, no-execute is permanently on: the process
+ * cannot turn it off, whatever its modules say. Otherwise Wine's behavior is
+ * unchanged. */
+static ULONG get_execute_flags(void)
+{
+    if (get_compat_force_nx() == 1) return execute_flags | MEM_EXECUTE_OPTION_PERMANENT;
+    return execute_flags;
+}
+
 static UINT process_error_mode;
 ULONG process_cookie = 0xdeadbeef;
 
@@ -1478,7 +1487,7 @@ NTSTATUS WINAPI NtQueryInformationProcess( HANDLE handle, PROCESSINFOCLASS class
                              MEM_EXECUTE_OPTION_DISABLE_THUNK_EMULATION |
                              MEM_EXECUTE_OPTION_PERMANENT;
         else
-            *(ULONG *)info = execute_flags;
+            *(ULONG *)info = get_execute_flags();
         break;
 
     case ProcessPriorityClass:
@@ -1765,6 +1774,11 @@ NTSTATUS WINAPI NtSetInformationProcess( HANDLE handle, PROCESSINFOCLASS class, 
     case ProcessExecuteFlags:
         if ((is_win64 && !is_wow64()) || size != sizeof(ULONG)) return STATUS_INVALID_PARAMETER;
         if (execute_flags & MEM_EXECUTE_OPTION_PERMANENT) return STATUS_ACCESS_DENIED;
+        if (get_execute_flags() & MEM_EXECUTE_OPTION_PERMANENT)
+        {
+            WARN( "no-exec stays on because compatdb.so keeps it permanently on\n" );
+            return STATUS_ACCESS_DENIED;
+        }
         else
         {
             BOOL enable;
