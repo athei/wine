@@ -327,6 +327,7 @@ struct vkd3d_shader_sm1_parser
     const struct vkd3d_shader_d3dbc_source_info *d3dbc_source_info;
 
     uint16_t texture_descriptors;
+    bool has_input_dcl;
 
     struct
     {
@@ -849,6 +850,16 @@ static bool add_signature_element_from_operand(struct vkd3d_shader_sm1_parser *s
                 return true;
             }
 
+            /* Direct3D 8 vertex shaders have no dcl instructions; their
+             * inputs come from the vertex declaration, which maps each
+             * register to the attribute of the same index. Declare all four
+             * components, since a later instruction may read more of them. */
+            if (version->type == VKD3D_SHADER_TYPE_VERTEX && version->major < 2 && !sm1->has_input_dcl
+                    && !find_signature_element_by_register_index(&sm1->program->input_signature, register_index)
+                    && !add_signature_element(sm1, false, "TEXCOORD", register_index, VKD3D_SHADER_SV_NONE,
+                    register_index, true, VKD3DSP_WRITEMASK_ALL, dst_modifiers))
+                return false;
+
             add_signature_mask(sm1, false, register_index, mask);
             return true;
 
@@ -968,6 +979,9 @@ static bool add_signature_element_from_semantic(struct vkd3d_shader_sm1_parser *
     if (version->type == VKD3D_SHADER_TYPE_VERTEX
             && output && semantic->usage == VKD3D_DECL_USAGE_POSITION)
         sysval = VKD3D_SHADER_SV_POSITION;
+
+    if (!output)
+        sm1->has_input_dcl = true;
 
     return add_signature_element(sm1, output, sm1_semantic_names[semantic->usage], semantic->usage_idx, sysval,
             reg->idx[0].offset, true, mask, modifiers);
