@@ -18387,7 +18387,7 @@ static void fog_special_test(void)
         ok(SUCCEEDED(hr), "Failed to end scene, hr %#lx.\n", hr);
 
         color = getPixelColor(device, 310, 240);
-        todo_wine_if(tests[i].vertexmode == D3DFOG_NONE) ok(color_match(color, tests[i].color_left, 1),
+        ok(color_match(color, tests[i].color_left, 1),
                 "Expected left color 0x%08x, got 0x%08x, case %u.\n", tests[i].color_left, color, i);
         color = getPixelColor(device, 330, 240);
         ok(color_match(color, tests[i].color_right, 1),
@@ -28198,11 +28198,13 @@ static void test_ffp_w(void)
 static void test_fog(void)
 {
     IDirect3DVertexShader9 *vs_no_fog, *vs_fog;
+    D3DADAPTER_IDENTIFIER9 identifier;
     struct d3d9_test_context context;
     struct surface_readback rb;
     const struct vec4 *colour;
     IDirect3DDevice9 *device;
     IDirect3DSurface9 *rt;
+    BOOL d3d9_class_gl;
     D3DMATRIX matrix;
     HRESULT hr;
 
@@ -28302,6 +28304,13 @@ static void test_fog(void)
     if (!init_test_context(&context))
         return;
     device = context.device;
+
+    /* wined3d reports a Direct3D 9 class card, a GeForce 6800, on Apple's OpenGL,
+     * where the FFP's table fog with an orthogonal projection still gives the wrong
+     * fog. On Zink it is right. */
+    hr = IDirect3D9_GetAdapterIdentifier(context.d3d, D3DADAPTER_DEFAULT, 0, &identifier);
+    ok(hr == S_OK, "Got hr %#lx.\n", hr);
+    d3d9_class_gl = adapter_is_vendor(&identifier, 0x10de) && identifier.DeviceId == 0x0041;
 
     hr = IDirect3DDevice9_CreateRenderTarget(device, 640, 480, D3DFMT_A32B32G32R32F,
             D3DMULTISAMPLE_NONE, 0, FALSE, &rt, NULL);
@@ -28516,7 +28525,8 @@ static void test_fog(void)
                     {
                         colour = get_readback_vec4(&rb, points[i].x, points[i].y);
 
-todo_wine_if ((fog_mode_tests[pixel_mode] != D3DFOG_NONE && (vs_mode == VS_MODE_FFP || (!ortho_fog && vs_mode == VS_MODE_RHW)))
+todo_wine_if ((fog_mode_tests[pixel_mode] != D3DFOG_NONE && ((vs_mode == VS_MODE_FFP && (!ortho_fog || d3d9_class_gl))
+                || (!ortho_fog && vs_mode == VS_MODE_RHW)))
         || (fog_mode_tests[pixel_mode] == D3DFOG_NONE && fog_mode_tests[vertex_mode] != D3DFOG_NONE && vs_mode == VS_MODE_FFP))
 {
                         if (fog_mode_tests[pixel_mode] != D3DFOG_NONE && ortho_fog)
@@ -28914,7 +28924,6 @@ static void test_texture_transform_flags(void)
                     colour = get_readback_vec4(&rb, 0, 0);
                     /* We use point filtering, but we might have sampled the
                      * neighbouring texel. */
-                    todo_wine_if (attrib_count == 1 && vs_mode == VS_MODE_FFP && ps_mode <= 1 && i == 7)
                     ok(fabsf(colour->x - expect[0]) <= 0.006f && fabsf(colour->y - expect[1]) <= 0.006f
                             && colour->z == expect[2] && colour->w == expect[3],
                             "Expected colour {%.8e, %.8e, %.8e, %.8e}; got {%.8e, %.8e, %.8e, %.8e}.\n",
