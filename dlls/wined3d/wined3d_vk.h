@@ -1201,6 +1201,10 @@ struct wined3d_swapchain_vk
     } *vk_semaphores;
     unsigned int current, image_count;
     unsigned int width, height;
+
+    /* The back buffer format has no Vulkan equivalent, so presentation goes
+     * through GDI and there is no Vulkan swapchain. */
+    bool gdi_back_buffer;
 };
 
 static inline struct wined3d_swapchain_vk *wined3d_swapchain_vk(struct wined3d_swapchain *swapchain)
@@ -1225,6 +1229,16 @@ struct wined3d_format_vk
 static inline const struct wined3d_format_vk *wined3d_format_vk(const struct wined3d_format *format)
 {
     return CONTAINING_RECORD(format, struct wined3d_format_vk, f);
+}
+
+/* 24-bit depth formats mapped to 32-bit float depth when the device has no
+ * 24-bit depth format. Their data is not converted on upload or download. */
+static inline bool wined3d_format_vk_is_depth_fallback(const struct wined3d_format *format)
+{
+    VkFormat vk_format = wined3d_format_vk(format)->vk_format;
+
+    return format->depth_size == 24
+            && (vk_format == VK_FORMAT_D32_SFLOAT || vk_format == VK_FORMAT_D32_SFLOAT_S8_UINT);
 }
 
 static inline void wined3d_context_vk_reference_bo(const struct wined3d_context_vk *context_vk,
