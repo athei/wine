@@ -758,6 +758,8 @@ static VkFormat get_swapchain_fallback_format(VkFormat vk_format)
         case VK_FORMAT_R8G8B8A8_UNORM:
         case VK_FORMAT_A2B10G10R10_UNORM_PACK32:
         case VK_FORMAT_R16G16B16A16_SFLOAT:
+        case VK_FORMAT_R5G6B5_UNORM_PACK16:
+        case VK_FORMAT_A1R5G5B5_UNORM_PACK16:
             return VK_FORMAT_B8G8R8A8_UNORM;
         default:
             WARN("Unhandled format %#x.\n", vk_format);
@@ -1087,6 +1089,12 @@ static void wined3d_swapchain_vk_set_swap_interval(struct wined3d_swapchain_vk *
     wined3d_swapchain_vk_recreate(swapchain_vk);
 }
 
+/* Desktop window and windowless swapchains present through GDI. */
+static bool wined3d_swapchain_vk_use_window(const struct wined3d_swapchain_vk *swapchain_vk)
+{
+    return swapchain_vk->s.win_handle && swapchain_vk->s.win_handle != GetDesktopWindow();
+}
+
 /* The image is kept in the device and destroyed with the context, in
  * adapter_vk_uninit_3d_cs(). */
 static struct wined3d_image_vk *wined3d_swapchain_vk_get_resolve_image(struct wined3d_swapchain_vk *swapchain_vk,
@@ -1365,6 +1373,29 @@ static void swapchain_vk_present(struct wined3d_swapchain *swapchain, const RECT
     HRESULT hr;
 
     context_vk = wined3d_context_vk(context_acquire(swapchain->device, back_buffer, 0));
+
+    /* ddraw changes the back buffer format on display mode changes without
+     * creating a new swapchain, so whether presentation can go through Vulkan
+     * is decided for each present. */
+    if (!wined3d_format_vk(back_buffer->resource.format)->vk_format)
+    {
+        if (!swapchain_vk->gdi_back_buffer)
+        {
+            TRACE("Back buffer format %s has no Vulkan equivalent, presenting through GDI.\n",
+                    debug_d3dformat(back_buffer->resource.format->id));
+            wined3d_swapchain_vk_destroy_vulkan_swapchain(swapchain_vk);
+            swapchain_vk->gdi_back_buffer = true;
+        }
+    }
+    else if (swapchain_vk->gdi_back_buffer)
+    {
+        TRACE("Back buffer format %s, presenting through Vulkan again.\n",
+                debug_d3dformat(back_buffer->resource.format->id));
+        swapchain_vk->gdi_back_buffer = false;
+        if (wined3d_swapchain_vk_use_window(swapchain_vk)
+                && FAILED(hr = wined3d_swapchain_vk_create_vulkan_swapchain(swapchain_vk)))
+            ERR("Failed to create a Vulkan swapchain, hr %#lx.\n", hr);
+    }
 
     if (!swapchain_vk->vk_swapchain || swapchain_present_is_partial_copy(swapchain, dst_rect))
     {
@@ -1926,9 +1957,23 @@ HRESULT wined3d_swapchain_vk_init(struct wined3d_swapchain_vk *swapchain_vk, str
             parent_ops, &swapchain_vk_ops)))
         return hr;
 
-    if (swapchain_vk->s.win_handle == GetDesktopWindow())
+    if (!wined3d_swapchain_vk_use_window(swapchain_vk))
     {
-        WARN("Creating a desktop window swapchain.\n");
+        WARN("Creating a swapchain for window %p, presenting through GDI.\n", swapchain_vk->s.win_handle);
+        return hr;
+    }
+
+    /* Back buffers in formats without a Vulkan equivalent (e.g. P8 for
+     * ddraw's 8-bit display modes) live in system memory only; present them
+     * through GDI, like desktop window swapchains. The description passed in
+     * may have WINED3DFMT_UNKNOWN as the back buffer format; the swapchain
+     * state has the resolved one. */
+    if (!wined3d_format_vk(wined3d_get_format(device->adapter,
+            swapchain_vk->s.state.desc.backbuffer_format, WINED3D_BIND_RENDER_TARGET))->vk_format)
+    {
+        WARN("No Vulkan format for back buffer format %s, presenting through GDI.\n",
+                debug_d3dformat(swapchain_vk->s.state.desc.backbuffer_format));
+        swapchain_vk->gdi_back_buffer = true;
         return hr;
     }
 
