@@ -126,8 +126,13 @@ static void wined3d_swapchain_vk_destroy_vulkan_swapchain(struct wined3d_swapcha
         VK_CALL(vkDestroySemaphore(device_vk->vk_device, swapchain_vk->vk_semaphores[i].presentable, NULL));
     }
     free(swapchain_vk->vk_semaphores);
+    swapchain_vk->vk_images = NULL;
+    swapchain_vk->vk_semaphores = NULL;
+    swapchain_vk->image_count = 0;
     VK_CALL(vkDestroySwapchainKHR(device_vk->vk_device, swapchain_vk->vk_swapchain, NULL));
     VK_CALL(vkDestroySurfaceKHR(vk_info->instance, swapchain_vk->vk_surface, NULL));
+    swapchain_vk->vk_swapchain = VK_NULL_HANDLE;
+    swapchain_vk->vk_surface = VK_NULL_HANDLE;
 }
 
 static void wined3d_swapchain_vk_destroy_object(void *object)
@@ -857,6 +862,7 @@ static bool wined3d_swapchain_vk_create_vulkan_swapchain_images(struct wined3d_s
     {
         ERR("Failed to get swapchain images, vr %s.\n", wined3d_debug_vkresult(vr));
         free(swapchain_vk->vk_images);
+        swapchain_vk->vk_images = NULL;
         return false;
     }
 
@@ -864,6 +870,7 @@ static bool wined3d_swapchain_vk_create_vulkan_swapchain_images(struct wined3d_s
     {
         ERR("Failed to allocate semaphores array.\n");
         free(swapchain_vk->vk_images);
+        swapchain_vk->vk_images = NULL;
         return false;
     }
 
@@ -900,6 +907,8 @@ fail:
     }
     free(swapchain_vk->vk_semaphores);
     free(swapchain_vk->vk_images);
+    swapchain_vk->vk_semaphores = NULL;
+    swapchain_vk->vk_images = NULL;
     return false;
 }
 
@@ -1037,6 +1046,7 @@ static HRESULT wined3d_swapchain_vk_create_vulkan_swapchain(struct wined3d_swapc
     if (!wined3d_swapchain_vk_create_vulkan_swapchain_images(swapchain_vk, vk_swapchain))
     {
         VK_CALL(vkDestroySwapchainKHR(device_vk->vk_device, vk_swapchain, NULL));
+        swapchain_vk->vk_swapchain = VK_NULL_HANDLE;
         goto fail;
     }
 
@@ -1077,6 +1087,36 @@ static void wined3d_swapchain_vk_set_swap_interval(struct wined3d_swapchain_vk *
     wined3d_swapchain_vk_recreate(swapchain_vk);
 }
 
+/* The image is kept in the device and destroyed with the context, in
+ * adapter_vk_uninit_3d_cs(). */
+static struct wined3d_image_vk *wined3d_swapchain_vk_get_resolve_image(struct wined3d_swapchain_vk *swapchain_vk,
+        struct wined3d_context_vk *context_vk, const struct wined3d_texture_vk *back_buffer_vk)
+{
+    struct wined3d_device_vk *device_vk = wined3d_device_vk(swapchain_vk->s.device);
+    VkFormat vk_format = wined3d_format_vk(back_buffer_vk->t.resource.format)->vk_format;
+    unsigned int width = back_buffer_vk->t.resource.width;
+    unsigned int height = back_buffer_vk->t.resource.height;
+    VkImageCreateInfo image_desc;
+
+    if (device_vk->present_resolve.image.vk_image)
+    {
+        if (device_vk->present_resolve.vk_format == vk_format
+                && device_vk->present_resolve.width == width && device_vk->present_resolve.height == height)
+            return &device_vk->present_resolve.image;
+        wined3d_context_vk_destroy_image(context_vk, &device_vk->present_resolve.image);
+    }
+
+    wined3d_init_vk_image_info(&image_desc, VK_IMAGE_TYPE_2D,
+            VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, vk_format, width, height, 1);
+    if (!wined3d_context_vk_create_image(context_vk, &image_desc, &device_vk->present_resolve.image))
+        return NULL;
+    device_vk->present_resolve.vk_format = vk_format;
+    device_vk->present_resolve.width = width;
+    device_vk->present_resolve.height = height;
+
+    return &device_vk->present_resolve.image;
+}
+
 static VkResult wined3d_swapchain_vk_blit(struct wined3d_swapchain_vk *swapchain_vk,
         struct wined3d_context_vk *context_vk, const RECT *src_rect, const RECT *dst_rect, unsigned int swap_interval)
 {
@@ -1088,6 +1128,8 @@ static VkResult wined3d_swapchain_vk_blit(struct wined3d_swapchain_vk *swapchain
     VkImageSubresourceRange vk_range;
     VkPresentInfoKHR present_desc;
     unsigned int present_idx;
+    struct wined3d_image_vk *resolve_image;
+    VkImage src_vk_image;
     VkImageLayout vk_layout;
     uint32_t image_idx;
     RECT dst_rect_tmp;
@@ -1101,6 +1143,21 @@ static VkResult wined3d_swapchain_vk_blit(struct wined3d_swapchain_vk *swapchain
             swapchain_vk, context_vk, wine_dbgstr_rect(src_rect), wine_dbgstr_rect(dst_rect), swap_interval);
 
     wined3d_swapchain_vk_set_swap_interval(swapchain_vk, swap_interval);
+    if (!swapchain_vk->vk_swapchain)
+    {
+        WARN("No Vulkan swapchain.\n");
+        return VK_ERROR_SURFACE_LOST_KHR;
+    }
+
+    /* Done before acquiring a swapchain image, which must be presented once
+     * acquired. */
+    resolve_image = NULL;
+    if (wined3d_resource_get_sample_count(&back_buffer_vk->t.resource) > 1
+            && !(resolve_image = wined3d_swapchain_vk_get_resolve_image(swapchain_vk, context_vk, back_buffer_vk)))
+    {
+        ERR("Failed to create a resolve image.\n");
+        return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+    }
 
     present_idx = swapchain_vk->current++ % swapchain_vk->image_count;
     wined3d_context_vk_wait_command_buffer(context_vk, swapchain_vk->vk_semaphores[present_idx].command_buffer_id);
@@ -1140,6 +1197,44 @@ static VkResult wined3d_swapchain_vk_blit(struct wined3d_swapchain_vk *swapchain
             back_buffer_vk->layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
             back_buffer_vk->image.vk_image, &vk_range);
 
+    /* vkCmdBlitImage() can't read multisampled images; resolve into a
+     * single-sampled image first. */
+    src_vk_image = back_buffer_vk->image.vk_image;
+    if (resolve_image)
+    {
+        VkImageResolve resolve;
+
+        src_vk_image = resolve_image->vk_image;
+        wined3d_context_vk_reference_image(context_vk, resolve_image);
+        wined3d_context_vk_image_barrier(context_vk, vk_command_buffer,
+                VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                0, VK_ACCESS_TRANSFER_WRITE_BIT,
+                VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                src_vk_image, &vk_range);
+
+        resolve.srcSubresource.aspectMask = vk_range.aspectMask;
+        resolve.srcSubresource.mipLevel = 0;
+        resolve.srcSubresource.baseArrayLayer = 0;
+        resolve.srcSubresource.layerCount = 1;
+        resolve.srcOffset.x = 0;
+        resolve.srcOffset.y = 0;
+        resolve.srcOffset.z = 0;
+        resolve.dstSubresource = resolve.srcSubresource;
+        resolve.dstOffset = resolve.srcOffset;
+        resolve.extent.width = back_buffer_vk->t.resource.width;
+        resolve.extent.height = back_buffer_vk->t.resource.height;
+        resolve.extent.depth = 1;
+        VK_CALL(vkCmdResolveImage(vk_command_buffer,
+                back_buffer_vk->image.vk_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                src_vk_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &resolve));
+
+        wined3d_context_vk_image_barrier(context_vk, vk_command_buffer,
+                VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                src_vk_image, &vk_range);
+    }
+
     wined3d_context_vk_image_barrier(context_vk, vk_command_buffer,
             VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
             0, VK_ACCESS_TRANSFER_WRITE_BIT,
@@ -1164,7 +1259,7 @@ static VkResult wined3d_swapchain_vk_blit(struct wined3d_swapchain_vk *swapchain
     blit.dstOffsets[1].y = dst_rect->bottom;
     blit.dstOffsets[1].z = 1;
     VK_CALL(vkCmdBlitImage(vk_command_buffer,
-            back_buffer_vk->image.vk_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            src_vk_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
             swapchain_vk->vk_images[image_idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
             1, &blit, filter));
 
