@@ -863,6 +863,10 @@ static VkImageView wined3d_view_vk_create_vk_image_view(struct wined3d_context_v
     {
         create_info.subresourceRange.aspectMask = vk_aspect_mask_from_format(&format_vk->f);
     }
+    /* Image views in descriptors can't have both the depth and the stencil
+     * aspect; shaders sample the depth of combined formats. */
+    if (!rtv && create_info.subresourceRange.aspectMask == (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT))
+        create_info.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
     create_info.subresourceRange.baseMipLevel = desc->u.texture.level_idx;
     create_info.subresourceRange.levelCount = desc->u.texture.level_count;
     if (create_info.viewType == VK_IMAGE_VIEW_TYPE_3D)
@@ -936,10 +940,18 @@ static void wined3d_render_target_view_vk_cs_init(void *object)
         return;
     }
 
-    if (resource->bind_flags & WINED3D_BIND_RENDER_TARGET)
+    if (wined3d_texture_vk_has_color_attachment_usage(&texture_vk->t))
         vk_usage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
     if (resource->bind_flags & WINED3D_BIND_DEPTH_STENCIL)
         vk_usage |= VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+
+    /* Without attachment usage the view can't be used in a framebuffer, and
+     * clears of such views don't use one. */
+    if (!vk_usage)
+    {
+        TRACE("Resource %p has no attachment bind flags, not creating an image view.\n", resource);
+        return;
+    }
 
     context = context_acquire(resource->device, NULL, 0);
     view_vk->vk_image_view = wined3d_view_vk_create_vk_image_view(wined3d_context_vk(context),
@@ -1427,6 +1439,7 @@ void wined3d_shader_resource_view_vk_generate_mipmap(struct wined3d_shader_resou
     struct wined3d_texture_vk *texture_vk;
     VkCommandBuffer vk_command_buffer;
     VkImageBlit region;
+    VkFilter vk_filter;
 
     TRACE("srv_vk %p.\n", srv_vk);
 
@@ -1452,6 +1465,14 @@ void wined3d_shader_resource_view_vk_generate_mipmap(struct wined3d_shader_resou
 
     if (wined3d_resource_get_sample_count(&texture_vk->t.resource) > 1)
         FIXME("Unhandled multi-sampled resource.\n");
+
+    /* Linear filtering needs linear filtering support for the image format,
+     * which e.g. integer formats don't have. */
+    if (wined3d_format_vk(texture_vk->t.resource.format)->vk_optimal_features
+            & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT)
+        vk_filter = VK_FILTER_LINEAR;
+    else
+        vk_filter = VK_FILTER_NEAREST;
 
     if (!(vk_command_buffer = wined3d_context_vk_get_command_buffer(context_vk)))
     {
@@ -1508,7 +1529,7 @@ void wined3d_shader_resource_view_vk_generate_mipmap(struct wined3d_shader_resou
         region.dstOffsets[1].z = wined3d_texture_get_level_depth(&texture_vk->t, vk_dst_range.baseMipLevel);
 
         VK_CALL(vkCmdBlitImage(vk_command_buffer, texture_vk->image.vk_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                texture_vk->image.vk_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region, VK_FILTER_LINEAR));
+                texture_vk->image.vk_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region, vk_filter));
 
         wined3d_context_vk_image_barrier(context_vk, vk_command_buffer,
                 VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,

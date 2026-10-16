@@ -1529,6 +1529,46 @@ static void wined3d_context_vk_destroy_graphics_pipeline(struct wine_rb_entry *e
     free(pipeline_vk);
 }
 
+/* Pipelines are looked up by the handles of their shader modules. Once a
+ * module is destroyed its handle may be handed out again for a different
+ * module, so the pipelines created from it have to go with it. */
+void wined3d_context_vk_remove_pipelines_for_module(struct wined3d_context_vk *context_vk, VkShaderModule vk_module)
+{
+    struct wined3d_graphics_pipeline_vk *pipeline_vk, **stale = NULL;
+    SIZE_T stale_size = 0, stale_count = 0, j;
+    unsigned int i;
+
+    /* Removing entries rebalances the tree, so collect them first. */
+    WINE_RB_FOR_EACH_ENTRY(pipeline_vk, &context_vk->graphics_pipelines, struct wined3d_graphics_pipeline_vk, entry)
+    {
+        for (i = 0; i < pipeline_vk->key.pipeline_desc.stageCount; ++i)
+        {
+            if (pipeline_vk->key.stages[i].module == vk_module)
+                break;
+        }
+        if (i == pipeline_vk->key.pipeline_desc.stageCount)
+            continue;
+        if (!wined3d_array_reserve((void **)&stale, &stale_size, stale_count + 1, sizeof(*stale)))
+        {
+            ERR("Failed to allocate memory.\n");
+            break;
+        }
+        stale[stale_count++] = pipeline_vk;
+    }
+
+    for (j = 0; j < stale_count; ++j)
+    {
+        pipeline_vk = stale[j];
+        wine_rb_remove(&context_vk->graphics_pipelines, &pipeline_vk->entry);
+        if (context_vk->graphics.vk_pipeline == pipeline_vk->vk_pipeline)
+            context_vk->graphics.vk_pipeline = VK_NULL_HANDLE;
+        wined3d_context_vk_destroy_vk_pipeline(context_vk, pipeline_vk->vk_pipeline,
+                context_vk->current_command_buffer.id);
+        free(pipeline_vk);
+    }
+    free(stale);
+}
+
 static void wined3d_context_vk_destroy_pipeline_layout(struct wine_rb_entry *entry, void *ctx)
 {
     struct wined3d_pipeline_layout_vk *layout = WINE_RB_ENTRY_VALUE(entry,
@@ -2995,6 +3035,31 @@ static bool wined3d_context_vk_begin_render_pass(struct wined3d_context_vk *cont
     fb_width = limits->maxFramebufferWidth;
     fb_height = limits->maxFramebufferHeight;
     fb_layer_count = limits->maxFramebufferLayers;
+    for (i = 0; i < ARRAY_SIZE(state->fb.render_targets) + 1; ++i)
+    {
+        view = i < ARRAY_SIZE(state->fb.render_targets) ? state->fb.render_targets[i] : state->fb.depth_stencil;
+        if (!view || view->format->id == WINED3DFMT_NULL)
+            continue;
+        fb_width = min(fb_width, view->width);
+        fb_height = min(fb_height, view->height);
+        fb_layer_count = min(fb_layer_count, view->layer_count);
+    }
+
+    /* Attachments in the cleared location are cleared by the load op of the
+     * render pass, but that only covers the render area, which is the size
+     * of the smallest attachment. Clear larger attachments in full first. */
+    for (i = 0; i < ARRAY_SIZE(state->fb.render_targets) + 1; ++i)
+    {
+        view = i < ARRAY_SIZE(state->fb.render_targets) ? state->fb.render_targets[i] : state->fb.depth_stencil;
+        if (!view || view->format->id == WINED3DFMT_NULL
+                || !(wined3d_rendertarget_view_get_locations(view) & WINED3D_LOCATION_CLEARED))
+            continue;
+        if (view->width == fb_width && view->height == fb_height && view->layer_count == fb_layer_count)
+            continue;
+        wined3d_rendertarget_view_load_location(view, &context_vk->c, view->resource->draw_binding);
+        wined3d_rendertarget_view_validate_location(view, view->resource->draw_binding);
+        wined3d_rendertarget_view_invalidate_location(view, ~view->resource->draw_binding);
+    }
     attachment_count = 0;
 
     context_vk->rt_count = 0;
@@ -3126,6 +3191,21 @@ static bool wined3d_context_vk_begin_render_pass(struct wined3d_context_vk *cont
     begin_info.renderArea.extent.height = fb_height;
     begin_info.pClearValues = clear_values;
     VK_CALL(vkCmdBeginRenderPass(vk_command_buffer, &begin_info, VK_SUBPASS_CONTENTS_INLINE));
+
+    /* The load op has now cleared the remaining cleared attachments, which
+     * all match the render area, including the ones the draw doesn't write
+     * (e.g. a depth buffer with depth writes disabled). Leaving them in the
+     * cleared location would make every following draw end the render pass
+     * to clear them again. */
+    for (i = 0; i < ARRAY_SIZE(state->fb.render_targets) + 1; ++i)
+    {
+        view = i < ARRAY_SIZE(state->fb.render_targets) ? state->fb.render_targets[i] : state->fb.depth_stencil;
+        if (!view || view->format->id == WINED3DFMT_NULL
+                || !(wined3d_rendertarget_view_get_locations(view) & WINED3D_LOCATION_CLEARED))
+            continue;
+        wined3d_rendertarget_view_validate_location(view, view->resource->draw_binding);
+        wined3d_rendertarget_view_invalidate_location(view, ~view->resource->draw_binding);
+    }
 
     LIST_FOR_EACH_ENTRY(query_vk, &context_vk->render_pass_queries, struct wined3d_query_vk, entry)
         wined3d_query_vk_resume(query_vk, context_vk);
@@ -4195,8 +4275,10 @@ VkCommandBuffer wined3d_context_vk_apply_draw_state(struct wined3d_context_vk *c
             viewport->y = src_viewport->y;
             viewport->width = src_viewport->width;
             viewport->height = src_viewport->height;
-            viewport->minDepth = src_viewport->min_z;
-            viewport->maxDepth = src_viewport->max_z;
+            /* Without VK_EXT_depth_range_unrestricted the depth range must be
+             * within [0, 1]. */
+            viewport->minDepth = min(max(src_viewport->min_z, 0.0f), 1.0f);
+            viewport->maxDepth = min(max(src_viewport->max_z, 0.0f), 1.0f);
 
             if (state->rasterizer_state && state->rasterizer_state->desc.scissor)
             {
