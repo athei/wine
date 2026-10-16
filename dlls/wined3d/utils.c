@@ -1958,6 +1958,7 @@ static void parse_channel_desc(struct wined3d_format *format, const char *channe
 
 static BOOL init_format_base_info(struct wined3d_adapter *adapter)
 {
+    static const enum wined3d_format_id height_scaled_formats[] = {WINED3DFMT_YV12, WINED3DFMT_NV12};
     struct wined3d_format *format;
     unsigned int i;
 
@@ -2033,6 +2034,19 @@ static BOOL init_format_base_info(struct wined3d_adapter *adapter)
 
         format->attrs |= format_base_flags[i].attrs;
         format_set_caps(format, format_base_flags[i].caps);
+    }
+
+    /* The chroma planes follow the luma plane, so the surface memory has to
+     * cover 3/2 of the height, whether the renderer can use the format or
+     * only keeps it in system memory. */
+    for (i = 0; i < ARRAY_SIZE(height_scaled_formats); ++i)
+    {
+        if (!(format = get_format_internal(adapter, height_scaled_formats[i])))
+            return FALSE;
+
+        format->attrs |= WINED3D_FORMAT_ATTR_HEIGHT_SCALE;
+        format->height_scale.numerator = 3;
+        format->height_scale.denominator = 2;
     }
 
     return TRUE;
@@ -3086,8 +3100,11 @@ static BOOL init_format_texture_info(struct wined3d_adapter *adapter, struct win
         format->format = format_texture_info[i].gl_format;
         format->type = format_texture_info[i].gl_type;
         format->f.color_fixup = COLOR_FIXUP_IDENTITY;
-        format->f.height_scale.numerator = 1;
-        format->f.height_scale.denominator = 1;
+        if (!(format->f.attrs & WINED3D_FORMAT_ATTR_HEIGHT_SCALE))
+        {
+            format->f.height_scale.numerator = 1;
+            format->f.height_scale.denominator = 1;
+        }
 
         format->f.caps[WINED3D_GL_RES_TYPE_TEX_1D] |= format_texture_info[i].caps | WINED3D_FORMAT_CAP_BLIT;
         format->f.caps[WINED3D_GL_RES_TYPE_TEX_2D] |= format_texture_info[i].caps | WINED3D_FORMAT_CAP_BLIT;
@@ -3496,15 +3513,9 @@ static void apply_format_fixups(struct wined3d_adapter *adapter, struct wined3d_
             || (gl_info->supported[ARB_FRAGMENT_SHADER] && gl_info->supported[ARB_VERTEX_SHADER]))
     {
         format = get_format_gl_internal(adapter, WINED3DFMT_YV12);
-        format->f.attrs |= WINED3D_FORMAT_ATTR_HEIGHT_SCALE;
-        format->f.height_scale.numerator = 3;
-        format->f.height_scale.denominator = 2;
         format->f.color_fixup = create_complex_fixup_desc(COMPLEX_FIXUP_YV12);
 
         format = get_format_gl_internal(adapter, WINED3DFMT_NV12);
-        format->f.attrs |= WINED3D_FORMAT_ATTR_HEIGHT_SCALE;
-        format->f.height_scale.numerator = 3;
-        format->f.height_scale.denominator = 2;
         format->f.color_fixup = create_complex_fixup_desc(COMPLEX_FIXUP_NV12);
     }
     else
@@ -4152,6 +4163,7 @@ static void init_vulkan_format_info(struct wined3d_adapter *adapter, struct wine
         {WINED3DFMT_R8_SNORM,                   VK_FORMAT_R8_SNORM,                },
         {WINED3DFMT_R8_SINT,                    VK_FORMAT_R8_SINT,                 },
         {WINED3DFMT_A8_UNORM,                   VK_FORMAT_R8_UNORM,                "000X"},
+        {WINED3DFMT_L8_UNORM,                   VK_FORMAT_R8_UNORM,                "XXX1"},
         {WINED3DFMT_B8G8R8A8_UNORM,             VK_FORMAT_B8G8R8A8_UNORM,          },
         {WINED3DFMT_B8G8R8A8_UNORM_SRGB,        VK_FORMAT_B8G8R8A8_SRGB,           },
         {WINED3DFMT_B8G8R8X8_UNORM,             VK_FORMAT_B8G8R8A8_UNORM,          "XYZ1"},
@@ -4159,6 +4171,8 @@ static void init_vulkan_format_info(struct wined3d_adapter *adapter, struct wine
         {WINED3DFMT_B5G6R5_UNORM,               VK_FORMAT_R5G6B5_UNORM_PACK16,     },
         {WINED3DFMT_B5G5R5A1_UNORM,             VK_FORMAT_A1R5G5B5_UNORM_PACK16,   },
         {WINED3DFMT_B4G4R4A4_UNORM,             VK_FORMAT_R4G4B4A4_UNORM_PACK16,   "YZWX"},
+        {WINED3DFMT_B5G5R5X1_UNORM,             VK_FORMAT_A1R5G5B5_UNORM_PACK16,   "XYZ1"},
+        {WINED3DFMT_B4G4R4X4_UNORM,             VK_FORMAT_R4G4B4A4_UNORM_PACK16,   "YZW1"},
         {WINED3DFMT_DXT1,                       VK_FORMAT_BC1_RGBA_UNORM_BLOCK,    },
         {WINED3DFMT_DXT2,                       VK_FORMAT_BC2_UNORM_BLOCK,         },
         {WINED3DFMT_DXT3,                       VK_FORMAT_BC2_UNORM_BLOCK,         },
@@ -4183,6 +4197,7 @@ static void init_vulkan_format_info(struct wined3d_adapter *adapter, struct wine
         {WINED3DFMT_R32_FLOAT_X8X24_TYPELESS,   VK_FORMAT_D32_SFLOAT_S8_UINT,      },
         {WINED3DFMT_X32_TYPELESS_G8X24_UINT,    VK_FORMAT_D32_SFLOAT_S8_UINT,      },
         {WINED3DFMT_D24_UNORM_S8_UINT,          VK_FORMAT_D24_UNORM_S8_UINT,       },
+        {WINED3DFMT_X8D24_UNORM,                VK_FORMAT_X8_D24_UNORM_PACK32,     },
         {WINED3DFMT_NV12_PLANAR,                VK_FORMAT_G8_B8R8_2PLANE_420_UNORM,},
     };
     const struct wined3d_d3d_info *d3d_info = &adapter->d3d_info;
@@ -4233,6 +4248,17 @@ static void init_vulkan_format_info(struct wined3d_adapter *adapter, struct wine
             WARN("Mapping VK_FORMAT_D24_UNORM_S8_UINT to VK_FORMAT_D32_SFLOAT_S8_UINT.\n");
 
             format->vk_format = vk_format = VK_FORMAT_D32_SFLOAT_S8_UINT;
+            VK_CALL(vkGetPhysicalDeviceFormatProperties(vk_physical_device, vk_format, &properties));
+        }
+    }
+    else if (vk_format == VK_FORMAT_X8_D24_UNORM_PACK32)
+    {
+        if (~properties.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT)
+        {
+            /* E.g. Apple GPUs have no 24-bit depth formats. */
+            WARN("Mapping VK_FORMAT_X8_D24_UNORM_PACK32 to VK_FORMAT_D32_SFLOAT.\n");
+
+            format->vk_format = vk_format = VK_FORMAT_D32_SFLOAT;
             VK_CALL(vkGetPhysicalDeviceFormatProperties(vk_physical_device, vk_format, &properties));
         }
     }
