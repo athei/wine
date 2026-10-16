@@ -4047,14 +4047,31 @@ void CDECL wined3d_device_apply_stateblock(struct wined3d_device *device,
             float start = int_to_float(state->rs[WINED3D_RS_FOGSTART]);
             float end = int_to_float(state->rs[WINED3D_RS_FOGEND]);
 
-            if (start == end && state->rs[WINED3D_RS_FOGTABLEMODE] == WINED3D_FOG_NONE)
+            if (start == end)
             {
                 /* With vertex fog, everything is fogged.
                  * With pixel fog, coordinates < start are unfogged,
                  * and coordinates > start are fogged.
-                 * Windows drivers disagree when coord == start. */
-                fog.end = 0.0f;
-                fog.scale = 0.0f;
+                 * Windows drivers disagree when coord == start.
+                 *
+                 * For pixel fog, 1 / (end - start) would be infinite. Drivers
+                 * may evaluate (end - coord) * scale per vertex, and
+                 * infinities of opposite signs interpolate to NaN. Make the
+                 * step about one ULP of end wide instead, which keeps the
+                 * product finite also for a huge end such as FLT_MAX, and use
+                 * a scale of 1e20 for an end at or near zero. */
+                if (state->rs[WINED3D_RS_FOGTABLEMODE] == WINED3D_FOG_NONE)
+                {
+                    fog.end = 0.0f;
+                    fog.scale = 0.0f;
+                }
+                else
+                {
+                    float ulp = fabsf(end) * FLT_EPSILON;
+
+                    fog.end = end;
+                    fog.scale = ulp > 1.0e-20f ? 1.0f / ulp : 1.0e20f;
+                }
             }
             else
             {
