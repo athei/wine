@@ -167,6 +167,7 @@ void wined3d_stream_info_from_declaration(struct wined3d_stream_info *stream_inf
 
     stream_info->use_map = 0;
     stream_info->swizzle_map = 0;
+    stream_info->packed_float_map = 0;
     stream_info->position_transformed = 0;
 
     if (!declaration)
@@ -249,6 +250,8 @@ void wined3d_stream_info_from_declaration(struct wined3d_stream_info *stream_inf
             {
                 stream_info->swizzle_map |= 1u << idx;
             }
+            if (!d3d_info->vertex_packed_float && element->format->id == WINED3DFMT_R11G11B10_FLOAT)
+                stream_info->packed_float_map |= 1u << idx;
             stream_info->use_map |= 1u << idx;
         }
     }

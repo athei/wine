@@ -855,6 +855,7 @@ struct wined3d_dummy_textures
     GLuint tex_1d_array;
     GLuint tex_2d_array;
     GLuint tex_buffer;
+    GLuint tex_buffer_bo;
     GLuint tex_2d_ms;
     GLuint tex_2d_ms_array;
 };

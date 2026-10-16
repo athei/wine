@@ -655,18 +655,19 @@ static void wined3d_device_gl_create_dummy_textures(struct wined3d_device_gl *de
 
     if (gl_info->supported[ARB_TEXTURE_BUFFER_OBJECT])
     {
-        GLuint buffer;
-
-        GL_EXTCALL(glGenBuffers(1, &buffer));
-        GL_EXTCALL(glBindBuffer(GL_TEXTURE_BUFFER, buffer));
+        GL_EXTCALL(glGenBuffers(1, &textures->tex_buffer_bo));
+        GL_EXTCALL(glBindBuffer(GL_TEXTURE_BUFFER, textures->tex_buffer_bo));
         GL_EXTCALL(glBufferData(GL_TEXTURE_BUFFER, sizeof(color), &color, GL_STATIC_DRAW));
         GL_EXTCALL(glBindBuffer(GL_TEXTURE_BUFFER, 0));
 
         gl_info->gl_ops.gl.p_glGenTextures(1, &textures->tex_buffer);
         TRACE("Dummy buffer texture given name %u.\n", textures->tex_buffer);
         gl_info->gl_ops.gl.p_glBindTexture(GL_TEXTURE_BUFFER, textures->tex_buffer);
-        GL_EXTCALL(glTexBuffer(GL_TEXTURE_BUFFER, GL_RGBA8, buffer));
-        GL_EXTCALL(glDeleteBuffers(1, &buffer));
+        GL_EXTCALL(glTexBuffer(GL_TEXTURE_BUFFER, GL_RGBA8, textures->tex_buffer_bo));
+        /* Keep the buffer name until the texture is deleted. Apple's OpenGL
+         * faults in glBufferData() for a later GL_TEXTURE_BUFFER buffer once
+         * a deleted buffer name that a buffer texture still uses has been
+         * reused, and the bad access leaves its context locked. */
     }
 
     if (gl_info->supported[ARB_TEXTURE_MULTISAMPLE])
@@ -711,7 +712,10 @@ static void wined3d_device_gl_destroy_dummy_textures(struct wined3d_device_gl *d
     }
 
     if (gl_info->supported[ARB_TEXTURE_BUFFER_OBJECT])
+    {
         gl_info->gl_ops.gl.p_glDeleteTextures(1, &dummy_textures->tex_buffer);
+        GL_EXTCALL(glDeleteBuffers(1, &dummy_textures->tex_buffer_bo));
+    }
 
     if (gl_info->supported[EXT_TEXTURE_ARRAY])
     {

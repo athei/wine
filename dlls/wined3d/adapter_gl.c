@@ -1249,8 +1249,10 @@ static enum wined3d_feature_level feature_level_from_caps(const struct wined3d_g
     shader_model = min(shader_model, max(shader_caps->hs_version, 4));
     shader_model = min(shader_model, max(shader_caps->ds_version, 4));
 
+    /* ARB_polygon_offset_clamp is not required. Without it the depth bias
+     * clamp is ignored, see depthbias() in ffp_gl.c. Apple's OpenGL 4.1
+     * lacks the extension and would otherwise be limited to 9_3. */
     if (gl_info->supported[WINED3D_GL_VERSION_3_2]
-            && gl_info->supported[ARB_POLYGON_OFFSET_CLAMP]
             && gl_info->supported[ARB_SAMPLER_OBJECTS])
     {
         if (shader_model >= 5
@@ -2723,6 +2725,7 @@ static void load_gl_funcs(struct wined3d_gl_info *gl_info)
     USE_GL_FUNC(glVertexAttrib4sv)                             /* OpenGL 2.0 */
     USE_GL_FUNC(glVertexAttrib4ubv)                            /* OpenGL 2.0 */
     USE_GL_FUNC(glVertexAttribDivisor)                         /* OpenGL 3.3 */
+    USE_GL_FUNC(glVertexAttribI1ui)                            /* OpenGL 3.0 */
     USE_GL_FUNC(glVertexAttribIPointer)                        /* OpenGL 3.0 */
     USE_GL_FUNC(glVertexAttribPointer)                         /* OpenGL 2.0 */
 #undef USE_GL_FUNC
@@ -2847,6 +2850,7 @@ static void load_gl_funcs(struct wined3d_gl_info *gl_info)
     MAP_GL_FUNCTION(glVertexAttrib4sv, glVertexAttrib4svARB);
     MAP_GL_FUNCTION(glVertexAttrib4ubv, glVertexAttrib4ubvARB);
     MAP_GL_FUNCTION(glVertexAttribDivisor, glVertexAttribDivisorARB);
+    MAP_GL_FUNCTION(glVertexAttribI1ui, glVertexAttribI1uiEXT);
     MAP_GL_FUNCTION(glVertexAttribIPointer, glVertexAttribIPointerEXT);
     MAP_GL_FUNCTION(glVertexAttribPointer, glVertexAttribPointerARB);
 #undef MAP_GL_FUNCTION
@@ -4951,6 +4955,7 @@ static void wined3d_adapter_gl_init_d3d_info(struct wined3d_adapter_gl *adapter_
     d3d_info->unconditional_npot = !!gl_info->supported[ARB_TEXTURE_NON_POWER_OF_TWO];
     d3d_info->draw_base_vertex_offset = !!gl_info->supported[ARB_DRAW_ELEMENTS_BASE_VERTEX];
     d3d_info->vertex_bgra = !!gl_info->supported[ARB_VERTEX_ARRAY_BGRA];
+    d3d_info->vertex_packed_float = !!gl_info->supported[ARB_VERTEX_TYPE_10F_11F_11F_REV];
     d3d_info->texture_swizzle = !!gl_info->supported[ARB_TEXTURE_SWIZZLE];
     d3d_info->srgb_read_control = !!gl_info->supported[EXT_TEXTURE_SRGB_DECODE];
     d3d_info->srgb_write_control = !!gl_info->supported[ARB_FRAMEBUFFER_SRGB];

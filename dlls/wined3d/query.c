@@ -1109,6 +1109,44 @@ static HRESULT wined3d_occlusion_query_create(struct wined3d_device *device,
     return WINED3D_OK;
 }
 
+static const struct wined3d_query_ops timestamp_disjoint_query_ops;
+
+/* Feature level 10 makes TIMESTAMP, TIMESTAMP_DISJOINT and PIPELINE_STATISTICS
+ * queries mandatory, and applications do not always check that creating one
+ * succeeded. Some GL implementations that otherwise reach feature level 10
+ * cannot provide them: Apple's OpenGL reports no timestamp counter bits and
+ * returns 0 for every timestamp, and it has no ARB_pipeline_statistics_query.
+ * On a device of feature level 10 or higher, create such a query anyway. It
+ * completes when it ends and returns fixed data: TIMESTAMP_DISJOINT reports
+ * Disjoint = TRUE, which tells the application to discard its timestamps,
+ * TIMESTAMP returns 0 and PIPELINE_STATISTICS returns zero counts. Devices of
+ * lower feature levels keep failing creation, as before. */
+static BOOL wined3d_query_gl_fallback_allowed(const struct wined3d_device *device)
+{
+    return device->cs->c.state->feature_level >= WINED3D_FEATURE_LEVEL_10;
+}
+
+static HRESULT wined3d_fallback_query_create(struct wined3d_device *device,
+        enum wined3d_query_type type, const void *data, unsigned int data_size,
+        void *parent, const struct wined3d_parent_ops *parent_ops, struct wined3d_query **query)
+{
+    struct wined3d_query *object;
+
+    WARN("Creating query type %#x with fixed results.\n", type);
+
+    if (!(object = calloc(1, sizeof(*object))))
+        return E_OUTOFMEMORY;
+
+    /* Like TIMESTAMP_DISJOINT queries, these return static data. */
+    wined3d_query_init(object, device, type, data, data_size,
+            &timestamp_disjoint_query_ops, parent, parent_ops);
+
+    TRACE("Created query %p.\n", object);
+    *query = object;
+
+    return WINED3D_OK;
+}
+
 static void wined3d_timestamp_query_ops_destroy(struct wined3d_query *query)
 {
     struct wined3d_timestamp_query *tq = wined3d_timestamp_query_from_query(query);
@@ -1137,6 +1175,11 @@ static HRESULT wined3d_timestamp_query_create(struct wined3d_device *device,
 
     if (!gl_info->supported[ARB_TIMER_QUERY])
     {
+        static const UINT64 timestamp;
+
+        if (wined3d_query_gl_fallback_allowed(device))
+            return wined3d_fallback_query_create(device, type, &timestamp,
+                    sizeof(timestamp), parent, parent_ops, query);
         WARN("Unsupported in local OpenGL implementation: ARB_TIMER_QUERY.\n");
         return WINED3DERR_NOTAVAILABLE;
     }
@@ -1177,6 +1220,11 @@ static HRESULT wined3d_timestamp_disjoint_query_create(struct wined3d_device *de
 
     if (!gl_info->supported[ARB_TIMER_QUERY])
     {
+        static const struct wined3d_query_data_timestamp_disjoint disjoint_data = {1000 * 1000 * 1000, TRUE};
+
+        if (type == WINED3D_QUERY_TYPE_TIMESTAMP_DISJOINT && wined3d_query_gl_fallback_allowed(device))
+            return wined3d_fallback_query_create(device, type, &disjoint_data,
+                    sizeof(disjoint_data), parent, parent_ops, query);
         WARN("Unsupported in local OpenGL implementation: ARB_TIMER_QUERY.\n");
         return WINED3DERR_NOTAVAILABLE;
     }
@@ -1290,6 +1338,11 @@ static HRESULT wined3d_pipeline_query_create(struct wined3d_device *device,
 
     if (!gl_info->supported[ARB_PIPELINE_STATISTICS_QUERY])
     {
+        static const struct wined3d_query_data_pipeline_statistics statistics;
+
+        if (wined3d_query_gl_fallback_allowed(device))
+            return wined3d_fallback_query_create(device, type, &statistics,
+                    sizeof(statistics), parent, parent_ops, query);
         WARN("OpenGL implementation does not support pipeline statistics queries.\n");
         return WINED3DERR_NOTAVAILABLE;
     }
