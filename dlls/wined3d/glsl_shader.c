@@ -2326,6 +2326,33 @@ static BOOL glsl_is_color_reg_read(const struct wined3d_shader *shader, unsigned
     return FALSE;
 }
 
+/* Without ARB_vertex_type_10f_11f_11f_rev, R11G11B10_FLOAT vertex attributes
+ * are loaded as a single unsigned integer and unpacked in the shader. Each
+ * component is an unsigned float with a 5-bit exponent and a 6-bit or 5-bit
+ * mantissa. */
+static void shader_glsl_generate_packed_float_unpack(struct wined3d_string_buffer *buffer)
+{
+    shader_addline(buffer, "float unpack_ufloat(uint e, uint m, uint mantissa_bits)\n{\n");
+    shader_addline(buffer, "    if (e == 0u)\n");
+    shader_addline(buffer, "        return float(m) * uintBitsToFloat((113u - mantissa_bits) << 23);\n");
+    shader_addline(buffer, "    if (e == 31u)\n");
+    shader_addline(buffer, "        return uintBitsToFloat(0x7f800000u | (m << (23u - mantissa_bits)));\n");
+    shader_addline(buffer, "    return uintBitsToFloat(((e + 112u) << 23) | (m << (23u - mantissa_bits)));\n");
+    shader_addline(buffer, "}\n");
+    shader_addline(buffer, "vec4 unpack_r11g11b10_float(uint v)\n{\n");
+    shader_addline(buffer, "    return vec4(unpack_ufloat((v >> 6) & 0x1fu, v & 0x3fu, 6u),\n");
+    shader_addline(buffer, "            unpack_ufloat((v >> 17) & 0x1fu, (v >> 11) & 0x3fu, 6u),\n");
+    shader_addline(buffer, "            unpack_ufloat(v >> 27, (v >> 22) & 0x1fu, 5u), 1.0);\n");
+    shader_addline(buffer, "}\n");
+}
+
+static BOOL shader_glsl_is_packed_float_attribute(const struct vs_compile_args *args,
+        const struct wined3d_shader_signature_element *e)
+{
+    return (args->packed_float_map & (1u << e->register_idx))
+            && e->sysval_semantic != WINED3D_SV_VERTEX_ID && e->sysval_semantic != WINED3D_SV_INSTANCE_ID;
+}
+
 static void shader_glsl_declare_typed_vertex_attribute(struct wined3d_string_buffer *buffer,
         const struct wined3d_gl_info *gl_info, const char *vector_type, const char *scalar_type,
         unsigned int index)
@@ -2337,7 +2364,8 @@ static void shader_glsl_declare_typed_vertex_attribute(struct wined3d_string_buf
 }
 
 static void shader_glsl_declare_generic_vertex_attribute(struct wined3d_string_buffer *buffer,
-        const struct wined3d_gl_info *gl_info, const struct wined3d_shader_signature_element *e)
+        const struct wined3d_gl_info *gl_info, const struct vs_compile_args *args,
+        const struct wined3d_shader_signature_element *e)
 {
     unsigned int index = e->register_idx;
     enum wined3d_component_type type;
@@ -2359,6 +2387,15 @@ static void shader_glsl_declare_generic_vertex_attribute(struct wined3d_string_b
 
     if (shader_glsl_use_explicit_attrib_location(gl_info))
         shader_addline(buffer, "layout(location = %u) ", index);
+
+    /* Assigned at the start of main(). Apple's GLSL linker crashes on a
+     * global initialiser that calls a user-defined function. */
+    if (shader_glsl_is_packed_float_attribute(args, e))
+    {
+        shader_addline(buffer, "%s uint vs_in_uint%u;\n", get_attribute_keyword(gl_info), index);
+        shader_addline(buffer, "vec4 vs_in%u;\n", index);
+        return;
+    }
 
     type = e->component_type;
     if ((unsigned int)type >= ARRAY_SIZE(component_type_info))
@@ -4515,11 +4552,22 @@ static void shader_glsl_cast(const struct wined3d_shader_instruction *ins,
         shader_addline(buffer, "%s(%s));\n", scalar_constructor, src_param.param_str);
 }
 
+static const char *shader_glsl_component_suffix(unsigned int mask_size, unsigned int idx)
+{
+    static const char * const suffixes[] = {".x", ".y", ".z", ".w"};
+
+    return mask_size > 1 ? suffixes[idx] : "";
+}
+
+/* shader_glsl_to_int() and shader_glsl_to_uint() select the result per
+ * component with the ?: operator. mix() with integer operands needs GLSL
+ * 4.50 or GL_EXT_shader_integer_mix, and Apple's OpenGL 4.1 has neither. */
 static void shader_glsl_to_int(const struct wined3d_shader_instruction *ins)
 {
     struct wined3d_string_buffer *buffer = ins->ctx->buffer;
     struct glsl_src_param src_param;
-    unsigned int mask_size;
+    unsigned int mask_size, i;
+    const char *c;
     DWORD write_mask;
 
     write_mask = shader_glsl_append_dst(buffer, ins);
@@ -4527,18 +4575,25 @@ static void shader_glsl_to_int(const struct wined3d_shader_instruction *ins)
     shader_glsl_add_src_param(ins, &ins->src[0], write_mask, &src_param);
 
     if (mask_size > 1)
-        shader_addline(buffer, "mix(mix(ivec%u(max(%s, vec%u(-2147483648.0))), ivec%u(0x7fffffff), greaterThanEqual(%s, vec%u(2147483648.0))), ivec%u(0), isnan(%s)));\n",
-                mask_size, src_param.param_str, mask_size, mask_size, src_param.param_str, mask_size, mask_size, src_param.param_str);
+        shader_addline(buffer, "ivec%u(", mask_size);
     else
-        shader_addline(buffer, "mix(mix(int(max(%s, -2147483648.0)), 0x7fffffff, %s >= 2147483648.0), 0, isnan(%s)));\n",
-                src_param.param_str, src_param.param_str, src_param.param_str);
+        shader_addline(buffer, "(");
+    for (i = 0; i < mask_size; ++i)
+    {
+        c = shader_glsl_component_suffix(mask_size, i);
+        shader_addline(buffer, "%s(isnan((%s)%s) ? 0 : (%s)%s >= 2147483648.0 ? 0x7fffffff"
+                " : int(max((%s)%s, -2147483648.0)))", i ? ", " : "",
+                src_param.param_str, c, src_param.param_str, c, src_param.param_str, c);
+    }
+    shader_addline(buffer, "));\n");
 }
 
 static void shader_glsl_to_uint(const struct wined3d_shader_instruction *ins)
 {
     struct wined3d_string_buffer *buffer = ins->ctx->buffer;
     struct glsl_src_param src_param;
-    unsigned int mask_size;
+    unsigned int mask_size, i;
+    const char *c;
     DWORD write_mask;
 
     write_mask = shader_glsl_append_dst(buffer, ins);
@@ -4546,11 +4601,16 @@ static void shader_glsl_to_uint(const struct wined3d_shader_instruction *ins)
     shader_glsl_add_src_param(ins, &ins->src[0], write_mask, &src_param);
 
     if (mask_size > 1)
-        shader_addline(buffer, "mix(uvec%u(max(%s, vec%u(0.0))), uvec%u(0xffffffffu), greaterThanEqual(%s, vec%u(4294967296.0))));\n",
-                mask_size, src_param.param_str, mask_size, mask_size, src_param.param_str, mask_size);
+        shader_addline(buffer, "uvec%u(", mask_size);
     else
-        shader_addline(buffer, "mix(uint(max(%s, 0.0)), 0xffffffffu, %s >= 4294967296.0));\n",
-                src_param.param_str, src_param.param_str);
+        shader_addline(buffer, "(");
+    for (i = 0; i < mask_size; ++i)
+    {
+        c = shader_glsl_component_suffix(mask_size, i);
+        shader_addline(buffer, "%s((%s)%s >= 4294967296.0 ? 0xffffffffu : uint(max((%s)%s, 0.0)))",
+                i ? ", " : "", src_param.param_str, c, src_param.param_str, c);
+    }
+    shader_addline(buffer, "));\n");
 }
 
 static void shader_glsl_to_float(const struct wined3d_shader_instruction *ins)
@@ -8193,7 +8253,14 @@ static GLuint shader_glsl_generate_vertex_shader(const struct wined3d_context_gl
     unsigned int i;
 
     if (priv->use_vkd3d)
+    {
+        /* vkd3d-shader declares the inputs itself, so neither the BGRA
+         * swizzle nor the R11G11B10_FLOAT unpacking of the GLSL generator
+         * is applied. */
+        if (args->packed_float_map)
+            FIXME("R11G11B10_FLOAT vertex attributes are not unpacked with vkd3d-shader.\n");
         return shader_glsl_generate_vkd3d_shader(context_gl, priv, shader, GL_VERTEX_SHADER);
+    }
 
     memset(&priv_ctx, 0, sizeof(priv_ctx));
     priv_ctx.gl_info = gl_info;
@@ -8213,8 +8280,11 @@ static GLuint shader_glsl_generate_vertex_shader(const struct wined3d_context_gl
     /* Base Declarations */
     shader_generate_glsl_declarations(context_gl, buffer, shader, reg_maps, &priv_ctx);
 
+    if (args->packed_float_map)
+        shader_glsl_generate_packed_float_unpack(buffer);
+
     for (i = 0; i < shader->input_signature.element_count; ++i)
-        shader_glsl_declare_generic_vertex_attribute(buffer, gl_info, &shader->input_signature.elements[i]);
+        shader_glsl_declare_generic_vertex_attribute(buffer, gl_info, args, &shader->input_signature.elements[i]);
 
     if (args->point_size && !shader->reg_maps.point_size && reg_maps->shader_version.major < 4)
     {
@@ -8250,6 +8320,15 @@ static GLuint shader_glsl_generate_vertex_shader(const struct wined3d_context_gl
                 gl_info, args->next_shader_type == WINED3D_SHADER_TYPE_PIXEL, args->interpolation_mode);
 
     shader_addline(buffer, "void main()\n{\n");
+
+    for (i = 0; i < shader->input_signature.element_count; ++i)
+    {
+        const struct wined3d_shader_signature_element *e = &shader->input_signature.elements[i];
+
+        if (shader_glsl_is_packed_float_attribute(args, e))
+            shader_addline(buffer, "vs_in%u = unpack_r11g11b10_float(vs_in_uint%u);\n",
+                    e->register_idx, e->register_idx);
+    }
 
     if (reg_maps->input_rel_addressing)
     {
@@ -8764,6 +8843,8 @@ static BOOL vs_args_equal(const struct vs_compile_args *stored, const struct vs_
         const DWORD use_map)
 {
     if ((stored->swizzle_map & use_map) != new->swizzle_map)
+        return FALSE;
+    if ((stored->packed_float_map & use_map) != new->packed_float_map)
         return FALSE;
     if ((stored->clip_enabled) != new->clip_enabled)
         return FALSE;
@@ -11332,8 +11413,7 @@ static unsigned int shader_glsl_get_shader_model(const struct wined3d_gl_info *g
 {
     BOOL shader_model_4 = gl_info->glsl_version >= MAKEDWORD_VERSION(1, 50)
             && gl_info->supported[ARB_SHADER_BIT_ENCODING]
-            && gl_info->supported[ARB_TEXTURE_SWIZZLE]
-            && gl_info->supported[EXT_SHADER_INTEGER_MIX];
+            && gl_info->supported[ARB_TEXTURE_SWIZZLE];
 
     if (shader_model_4
             && gl_info->supported[ARB_COMPUTE_SHADER]
@@ -11793,10 +11873,12 @@ static void glsl_vertex_pipe_vdecl(struct wined3d_context *context,
      * the draw uses the fixed function vertex pipeline regardless of any
      * vertex shader set by the application. */
     if (transformed != wasrhw
-            || context->stream_info.swizzle_map != context->last_swizzle_map)
+            || context->stream_info.swizzle_map != context->last_swizzle_map
+            || context->stream_info.packed_float_map != context->last_packed_float_map)
         context->shader_update_mask |= 1u << WINED3D_SHADER_TYPE_VERTEX;
 
     context->last_swizzle_map = context->stream_info.swizzle_map;
+    context->last_packed_float_map = context->stream_info.packed_float_map;
 
     if (!use_vs(state))
     {

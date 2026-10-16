@@ -2732,6 +2732,7 @@ void find_vs_compile_args(const struct wined3d_state *state, const struct wined3
     else
         args->next_shader_input_count = 0;
     args->swizzle_map = swizzle_map;
+    args->packed_float_map = context->stream_info.packed_float_map;
     if (d3d_info->emulated_flatshading)
         args->flatshading = state->extra_vs_args.flat_shading;
     else

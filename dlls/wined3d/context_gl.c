@@ -4922,7 +4922,11 @@ static void wined3d_context_gl_load_numbered_arrays(struct wined3d_context_gl *c
              * pointer. vb can point to a user pointer data blob. In that case
              * current_bo will be 0. If there is a vertex buffer but no vbo we
              * won't be load converted attributes anyway. */
-            if (vs && vs->reg_maps.shader_version.major >= 4 && (format_attrs & WINED3D_FORMAT_ATTR_INTEGER))
+            if (stream_info->packed_float_map & (1u << i))
+            {
+                GL_EXTCALL(glVertexAttribIPointer(i, 1, GL_UNSIGNED_INT, element->stride, offset));
+            }
+            else if (vs && vs->reg_maps.shader_version.major >= 4 && (format_attrs & WINED3D_FORMAT_ATTR_INTEGER))
             {
                 GL_EXTCALL(glVertexAttribIPointer(i, format_gl->vtx_format,
                         format_gl->vtx_type, element->stride, offset));
@@ -5043,6 +5047,13 @@ static void wined3d_context_gl_load_numbered_arrays(struct wined3d_context_gl *c
                         GL_EXTCALL(glVertexAttrib4f(i, x, y, z, w));
                     }
                     break;
+                case WINED3DFMT_R11G11B10_FLOAT:
+                    if (stream_info->packed_float_map & (1u << i))
+                    {
+                        GL_EXTCALL(glVertexAttribI1ui(i, *(const GLuint *)ptr));
+                        break;
+                    }
+                    /* fall through */
                 default:
                     ERR("Unexpected declaration in stride 0 attributes.\n");
                     break;

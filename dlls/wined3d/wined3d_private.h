@@ -234,6 +234,7 @@ struct wined3d_d3d_info
     uint32_t unconditional_npot : 1;
     uint32_t draw_base_vertex_offset : 1;
     uint32_t vertex_bgra : 1;
+    uint32_t vertex_packed_float : 1;
     uint32_t texture_swizzle : 1;
     uint32_t srgb_read_control : 1;
     uint32_t srgb_write_control : 1;
@@ -1501,6 +1502,7 @@ enum fog_src_type
 struct vs_compile_args
 {
     DWORD swizzle_map;   /* MAX_ATTRIBS, 32 */
+    uint32_t packed_float_map; /* MAX_ATTRIBS, 32 */
     unsigned int next_shader_input_count;
     uint32_t interpolation_mode[WINED3D_PACKED_INTERPOLATION_SIZE];
     BYTE fog_src;
@@ -1648,6 +1650,7 @@ struct wined3d_stream_info
     DWORD position_transformed : 1;
     DWORD all_vbo : 1;
     DWORD swizzle_map; /* MAX_ATTRIBS, 32 */
+    uint32_t packed_float_map; /* MAX_ATTRIBS, 32 */
     DWORD use_map; /* MAX_ATTRIBS, 32 */
 };
 
@@ -1878,6 +1881,7 @@ struct wined3d_context
 
     /* Stores some information about the context state for optimization */
     DWORD last_swizzle_map; /* MAX_ATTRIBS, 32 */
+    uint32_t last_packed_float_map; /* MAX_ATTRIBS, 32 */
 
     DWORD shader_update_mask : 6; /* WINED3D_SHADER_TYPE_COUNT, 6 */
     DWORD update_shader_resource_bindings : 1;

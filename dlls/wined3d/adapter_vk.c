@@ -2344,6 +2344,7 @@ static void wined3d_adapter_vk_init_d3d_info(struct wined3d_adapter_vk *adapter_
     d3d_info->unconditional_npot = true;
     d3d_info->draw_base_vertex_offset = true;
     d3d_info->vertex_bgra = true;
+    d3d_info->vertex_packed_float = true;
     d3d_info->texture_swizzle = true;
     d3d_info->srgb_read_control = false;
     d3d_info->srgb_write_control = false;
