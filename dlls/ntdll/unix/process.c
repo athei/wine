@@ -75,6 +75,23 @@ WINE_DEFAULT_DEBUG_CHANNEL(process);
 
 static ULONG execute_flags = MEM_EXECUTE_OPTION_DISABLE;
 
+/* WINE_FORCE_NX set to anything but "0" keeps no-execute permanently on, as
+ * the Windows AlwaysOn policy does: the process cannot turn it off, whatever
+ * its modules say. Unset or "0", Wine's behavior is unchanged. */
+static ULONG get_execute_flags(void)
+{
+    static int always_on = -1;
+
+    if (always_on == -1)
+    {
+        const char *env = getenv( "WINE_FORCE_NX" );
+
+        always_on = env && strcmp( env, "0" ) != 0;
+        if (always_on) TRACE( "no-execute is permanently on\n" );
+    }
+    return always_on ? execute_flags | MEM_EXECUTE_OPTION_PERMANENT : execute_flags;
+}
+
 static UINT process_error_mode;
 ULONG process_cookie = 0xdeadbeef;
 
@@ -1478,7 +1495,7 @@ NTSTATUS WINAPI NtQueryInformationProcess( HANDLE handle, PROCESSINFOCLASS class
                              MEM_EXECUTE_OPTION_DISABLE_THUNK_EMULATION |
                              MEM_EXECUTE_OPTION_PERMANENT;
         else
-            *(ULONG *)info = execute_flags;
+            *(ULONG *)info = get_execute_flags();
         break;
 
     case ProcessPriorityClass:
@@ -1765,6 +1782,11 @@ NTSTATUS WINAPI NtSetInformationProcess( HANDLE handle, PROCESSINFOCLASS class, 
     case ProcessExecuteFlags:
         if ((is_win64 && !is_wow64()) || size != sizeof(ULONG)) return STATUS_INVALID_PARAMETER;
         if (execute_flags & MEM_EXECUTE_OPTION_PERMANENT) return STATUS_ACCESS_DENIED;
+        if (get_execute_flags() & MEM_EXECUTE_OPTION_PERMANENT)
+        {
+            WARN( "no-exec stays on because WINE_FORCE_NX is set\n" );
+            return STATUS_ACCESS_DENIED;
+        }
         else
         {
             BOOL enable;
