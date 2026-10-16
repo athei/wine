@@ -1116,6 +1116,9 @@ static void shader_spirv_destroy(struct wined3d_shader *shader)
     {
         variant_vk = &program_vk->variants[i];
         shader_spirv_invalidate_contexts_graphics_program_variant(&device_vk->d, variant_vk);
+        for (unsigned int j = 0; j < device_vk->d.context_count; ++j)
+            wined3d_context_vk_remove_pipelines_for_module(wined3d_context_vk(device_vk->d.contexts[j]),
+                    variant_vk->vk_module);
         VK_CALL(vkDestroyShaderModule(device_vk->vk_device, variant_vk->vk_module, NULL));
     }
     free(program_vk->variants);

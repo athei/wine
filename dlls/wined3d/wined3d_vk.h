@@ -798,6 +798,8 @@ void wined3d_context_vk_destroy_vk_event(struct wined3d_context_vk *context_vk,
         VkEvent vk_event, uint64_t command_buffer_id);
 void wined3d_context_vk_destroy_vk_pipeline(struct wined3d_context_vk *context_vk,
         VkPipeline vk_pipeline, uint64_t command_buffer_id);
+void wined3d_context_vk_remove_pipelines_for_module(struct wined3d_context_vk *context_vk,
+        VkShaderModule vk_module);
 void wined3d_context_vk_destroy_vk_video_parameters(struct wined3d_context_vk *context_vk,
         VkVideoSessionParametersKHR vk_video_parameters, uint64_t command_buffer_id);
 void wined3d_context_vk_destroy_vk_video_session(struct wined3d_context_vk *context_vk,
@@ -947,6 +949,14 @@ struct wined3d_device_vk
     struct wined3d_allocator allocator;
 
     struct wined3d_uav_clear_state_vk uav_clear_state;
+
+    /* Single-sampled copy of a multisampled back buffer, for presentation. */
+    struct
+    {
+        struct wined3d_image_vk image;
+        VkFormat vk_format;
+        unsigned int width, height;
+    } present_resolve;
 };
 
 static inline struct wined3d_device_vk *wined3d_device_vk(struct wined3d_device *device)
@@ -1209,6 +1219,7 @@ struct wined3d_format_vk
     struct wined3d_format f;
 
     VkFormat vk_format;
+    VkFormatFeatureFlags vk_optimal_features;
 };
 
 static inline const struct wined3d_format_vk *wined3d_format_vk(const struct wined3d_format *format)
@@ -1220,6 +1231,23 @@ static inline void wined3d_context_vk_reference_bo(const struct wined3d_context_
         struct wined3d_bo_vk *bo)
 {
     bo->command_buffer_id = context_vk->current_command_buffer.id;
+}
+
+/* Whether the texture's image gets colour attachment usage. Besides render
+ * targets, that includes textures without bind flags (e.g. d3d9 and ddraw
+ * offscreen plain surfaces), which d3d9 and ddraw colour fill; those images
+ * use VK_IMAGE_LAYOUT_GENERAL, which a colour attachment can use. For those,
+ * the image format itself has to support colour attachments with optimal
+ * tiling. The RENDERTARGET format cap isn't enough: it also covers linear
+ * tiling, and planar formats inherit it from their plane formats. */
+static inline bool wined3d_texture_vk_has_color_attachment_usage(const struct wined3d_texture *texture)
+{
+    const struct wined3d_resource *resource = &texture->resource;
+
+    if (resource->bind_flags & WINED3D_BIND_RENDER_TARGET)
+        return true;
+    return !resource->bind_flags
+            && (wined3d_format_vk(resource->format)->vk_optimal_features & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT);
 }
 
 static inline void wined3d_context_vk_reference_image(const struct wined3d_context_vk *context_vk,
