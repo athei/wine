@@ -326,6 +326,10 @@ static void wined3d_texture_vk_upload_data(struct wined3d_context *context,
         return;
     }
 
+    if (wined3d_format_vk_is_depth_fallback(dst_texture->resource.format))
+        FIXME("Uploading %s data to a %#x image without conversion.\n",
+                debug_d3dformat(src_format->id), wined3d_format_vk(dst_texture->resource.format)->vk_format);
+
     aspect_mask = vk_aspect_mask_from_format(dst_texture->resource.format);
     if (wined3d_popcount(aspect_mask) > 1)
     {
@@ -612,6 +616,10 @@ static void wined3d_texture_vk_download_data(struct wined3d_context *context,
         FIXME("Unhandled destination (%u, %u, %u).\n", dst_x, dst_y, dst_z);
         return;
     }
+
+    if (wined3d_format_vk_is_depth_fallback(src_texture->resource.format))
+        FIXME("Downloading %s data from a %#x image without conversion.\n",
+                debug_d3dformat(dst_format->id), wined3d_format_vk(src_texture->resource.format)->vk_format);
 
     if (wined3d_resource_get_sample_count(&src_texture->resource) > 1)
     {
