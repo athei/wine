@@ -16116,6 +16116,7 @@ static void test_map_synchronisation(void)
     BOOL unsynchronised, ret;
     IDirectDrawSurface7 *rt;
     IDirectDraw7 *ddraw;
+    LONGLONG estimate;
     IDirect3D7 *d3d;
     ULONG refcount;
     HWND window;
@@ -16250,9 +16251,18 @@ static void test_map_synchronisation(void)
 
     IDirect3DVertexBuffer7_Release(buffer);
 
-    /* Estimate the number of triangles we can draw in 100ms. */
+    /* Estimate the number of triangles we can draw in 100ms. When both draws
+     * are fast compared to the readbacks, the single triangle can take about
+     * as long as all of them, and the difference is just noise. */
     diff.QuadPart = ts[1].QuadPart - ts[0].QuadPart + ts[1].QuadPart - ts[2].QuadPart;
-    tri_count = (tri_count * frequency.QuadPart) / (diff.QuadPart * 10);
+    estimate = diff.QuadPart > 0 ? (tri_count * frequency.QuadPart) / (diff.QuadPart * 10) : -1;
+    if (estimate < 0 || estimate > 0x555555)
+    {
+        skip("Failed to estimate the draw time, skipping test.\n");
+        IDirectDrawSurface7_Release(rt);
+        goto done;
+    }
+    tri_count = estimate;
     tri_count = ((tri_count + 2 + 3) & ~3) - 2;
     vb_desc.dwNumVertices = tri_count + 2;
 
