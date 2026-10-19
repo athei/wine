@@ -253,6 +253,8 @@ struct macdrv_client_surface
     WineMetalSwapChain_id   metal_swapchain;
     unsigned int            present_count;      /* number of presents, see macdrv_client_surface_present */
     bool                    presented;          /* has presented a frame */
+    bool                    hidden;             /* see update_client_view_hidden, guarded by the window data lock */
+    unsigned int            hidden_serial;      /* see update_client_view_hidden, guarded by the window data lock */
 };
 
 extern struct macdrv_client_surface *impl_from_client_surface(struct client_surface *client);
