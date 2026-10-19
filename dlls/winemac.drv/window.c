@@ -1112,17 +1112,164 @@ static void macdrv_client_surface_detach(struct client_surface *client)
     }
 }
 
+struct client_view_list
+{
+    HWND         hwnd;
+    unsigned int count;
+    struct
+    {
+        HWND             hwnd;
+        WineContentView *view;
+    } *entries;
+};
+
+static void collect_client_view(const void *key, const void *value, void *context)
+{
+    const struct macdrv_win_data *data = value;
+    struct client_view_list *list = context;
+
+    /* skip toplevels, the only windows with a Cocoa window */
+    if (!data->client_view || data->cocoa_window || data->hwnd == list->hwnd) return;
+    list->entries[list->count].hwnd = data->hwnd;
+    list->entries[list->count].view = data->client_view;
+    list->count++;
+}
+
+/* Fill chain with hwnd and its ancestors, ending with its toplevel. */
+static unsigned int get_window_ancestors(HWND hwnd, HWND *chain, unsigned int size)
+{
+    HWND desktop = NtUserGetDesktopWindow();
+    unsigned int count = 0;
+
+    while (hwnd && hwnd != desktop)
+    {
+        if (count == size) return 0;
+        chain[count++] = hwnd;
+        hwnd = NtUserGetAncestor(hwnd, GA_PARENT);
+    }
+    return count;
+}
+
+/* Whether a window and all its ancestors up to its toplevel are visible. */
+static BOOL is_chain_visible(const HWND *chain, unsigned int count)
+{
+    while (count--)
+        if (!(NtUserGetWindowLongW(chain[count], GWL_STYLE) & WS_VISIBLE)) return FALSE;
+    return TRUE;
+}
+
+/* Whether hwnd is above its sibling, from one list of hwnd and the siblings below it. */
+static BOOL is_sibling_above(HWND hwnd, HWND sibling)
+{
+    HWND buffer[64], *list = buffer;
+    ULONG i, count = ARRAY_SIZE(buffer);
+    NTSTATUS status;
+    BOOL ret = FALSE;
+
+    while ((status = NtUserBuildHwndList(0, hwnd, FALSE, FALSE, 0, count, list, &count)) == STATUS_BUFFER_TOO_SMALL)
+    {
+        if (list != buffer) free(list);
+        if (!(list = malloc(count * sizeof(*list)))) return FALSE;
+    }
+    for (i = 0; !status && list[i] != HWND_BOTTOM; i++)
+    {
+        if (list[i] != sibling) continue;
+        ret = TRUE;
+        break;
+    }
+    if (list != buffer) free(list);
+    return ret;
+}
+
+/* Whether a window is above another of the same toplevel, given the ancestor
+ * chains of both: a child is above its ancestors, and windows with different
+ * parents are ordered as their ancestors are where the chains diverge. */
+static BOOL is_window_above(const HWND *chain, unsigned int count, const HWND *other, unsigned int other_count)
+{
+    while (count > 1 && other_count > 1 && chain[count - 2] == other[other_count - 2])
+    {
+        count--;
+        other_count--;
+    }
+    if (count == 1) return FALSE;
+    if (other_count == 1) return TRUE;
+    return is_sibling_above(chain[count - 2], other[other_count - 2]);
+}
+
+/***********************************************************************
+ *              find_client_view_above
+ *
+ * Find the view that the client view of a child window goes directly
+ * below: the current client view of the lowest visible window of the same
+ * toplevel that is above the window. The window data lock must not be held.
+ */
+static WineContentView *find_client_view_above(HWND hwnd, HWND toplevel, HWND *above_hwnd)
+{
+    struct client_view_list list = {.hwnd = hwnd};
+    HWND chain[32], other[32], best[32];
+    unsigned int i, count, other_count, best_count = 0;
+    WineContentView *ret = NULL;
+
+    pthread_mutex_lock(&win_data_mutex);
+    if (win_datas && (list.entries = malloc(CFDictionaryGetCount(win_datas) * sizeof(*list.entries))))
+        CFDictionaryApplyFunction(win_datas, collect_client_view, &list);
+    pthread_mutex_unlock(&win_data_mutex);
+
+    if (list.count && (count = get_window_ancestors(hwnd, chain, ARRAY_SIZE(chain))) &&
+        chain[count - 1] == toplevel)
+    {
+        for (i = 0; i < list.count; i++)
+        {
+            if (!(other_count = get_window_ancestors(list.entries[i].hwnd, other, ARRAY_SIZE(other)))) continue;
+            if (other[other_count - 1] != toplevel) continue;
+            if (!is_chain_visible(other, other_count)) continue;
+            if (is_window_above(chain, count, other, other_count)) continue;
+            if (ret && is_window_above(other, other_count, best, best_count)) continue;
+
+            memcpy(best, other, other_count * sizeof(*other));
+            best_count = other_count;
+            *above_hwnd = list.entries[i].hwnd;
+            ret = list.entries[i].view;
+        }
+    }
+
+    free(list.entries);
+    return ret;
+}
+
 static void macdrv_client_surface_update(struct client_surface *client)
 {
     struct macdrv_client_surface *surface = impl_from_client_surface(client);
-    HWND hwnd = client->hwnd, toplevel = client->toplevel;
+    HWND hwnd = client->hwnd, toplevel = client->toplevel, above_hwnd = NULL;
+    WineContentView *above_view = NULL;
     struct macdrv_win_data *data;
 
     TRACE("%s\n", debugstr_client_surface(client));
 
+    /* The client views of a toplevel's child windows share a superview, so
+     * order them as their windows are ordered. Raising the view on every
+     * update instead swaps the views of child windows that present in turn. */
+    if (toplevel != hwnd) above_view = find_client_view_above(hwnd, toplevel, &above_hwnd);
+
     if (!(data = get_win_data(toplevel))) return;
+
+    /* The view may have been replaced or detached since it was found. Keep
+     * holding the window data until the view is passed on, so it stays alive. */
+    if (above_view)
+    {
+        struct macdrv_win_data *above_data = get_win_data(above_hwnd);
+
+        if (!above_data || above_data->client_view != above_view)
+        {
+            TRACE("client view %p of %p is gone\n", above_view, above_hwnd);
+            above_view = NULL;
+        }
+        release_win_data(above_data);
+    }
+
     macdrv_set_view_frame(surface->cocoa_view, cgrect_from_rect(client->monitor_rect));
-    macdrv_set_view_superview(surface->cocoa_view, toplevel == hwnd ? NULL : data->client_view, data->cocoa_window, NULL, NULL);
+    macdrv_set_view_superview(surface->cocoa_view, toplevel == hwnd ? NULL : data->client_view, data->cocoa_window,
+                              above_view, NULL);
     release_win_data(data);
 }
 
