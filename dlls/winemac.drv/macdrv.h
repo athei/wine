@@ -136,6 +136,7 @@ enum macdrv_window_messages
     WM_MACDRV_ACTIVATE_ON_FOLLOWING_FOCUS,
     WM_MACDRV_CREATE_REMOTE_LAYER,
     WM_MACDRV_RELEASE_REMOTE_LAYER,
+    WM_MACDRV_REATTACH_CLIENT_VIEWS,
 };
 
 struct macdrv_thread_data
@@ -227,6 +228,16 @@ extern pthread_mutex_t ime_composition_rect_mutex;
 extern void macdrv_ime_set_text(HWND hwnd, CFStringRef text, bool complete,
                                 unsigned int cursor_begin, unsigned int cursor_end, void *update);
 
+/* where the window surface of a toplevel shows above its client views, see update_client_overlay */
+struct client_overlay
+{
+    CGRect             *rects;
+    unsigned int        count;
+    unsigned int        pending;                /* mask of the rects that wait for a flush to paint them */
+    unsigned int        serial;                 /* of the newest update that started */
+    CGRect              unpainted;              /* windows that may not have painted their new place yet */
+};
+
 /* macdrv private window data */
 struct macdrv_win_data
 {
@@ -244,6 +255,7 @@ struct macdrv_win_data
     unsigned int        minimized : 1;          /* is window minimized? */
     unsigned int        fullscreen : 1;         /* is the window visible rect fullscreen? (unrelated to native AppKit/Cocoa fullscreen) */
     CFMutableArrayRef   d3dmetal_client_surfaces; /* client surfaces created through macdrv_functions */
+    struct client_overlay client_overlay;
 };
 
 struct macdrv_client_surface
@@ -251,6 +263,7 @@ struct macdrv_client_surface
     struct client_surface   client;
     WineContentView        *cocoa_view;
     WineMetalSwapChain_id   metal_swapchain;
+    RECT                    view_rect;          /* frame of cocoa_view, guarded by the window data lock */
     unsigned int            present_count;      /* number of presents, see macdrv_client_surface_present */
     bool                    presented;          /* has presented a frame */
     bool                    hidden;             /* see update_client_view_hidden, guarded by the window data lock */
@@ -265,6 +278,7 @@ extern void release_win_data(struct macdrv_win_data *data);
 extern bool get_fullscreen_content_rect(const struct window_rects *rects, RECT *rect);
 extern void set_shape_pending(struct macdrv_win_data *data, bool pending);
 extern bool is_d3dmetal_client_view_presenting(struct macdrv_win_data *data);
+extern void flush_client_overlay(struct macdrv_win_data *data, const RECT *dirty);
 extern void init_win_context(void);
 extern WineWindow *macdrv_get_cocoa_window(HWND hwnd, bool require_on_screen);
 extern RGNDATA *get_region_data(HRGN hrgn, HDC hdc_lptodp);

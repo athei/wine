@@ -159,7 +159,12 @@ static BOOL macdrv_surface_flush(struct window_surface *window_surface, const RE
             TRACE("hiding client view %p of %p\n", data->client_view, window_surface->hwnd);
             macdrv_set_view_hidden(data->client_view, TRUE);
             data->client_view = NULL;
+            /* The client overlay may hold rects above the client views of
+             * child windows that still present. Its rects above this view
+             * show what the window surface below shows now, and the next
+             * update removes them. */
         }
+        flush_client_overlay(data, &dirty_rect);
         release_win_data(data);
     }
 
