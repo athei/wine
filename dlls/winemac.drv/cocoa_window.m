@@ -232,6 +232,11 @@ static inline BOOL stage_manager_enabled(void)
     BOOL shapeImageCoversView;
     CALayer* offsetImageLayer;
 
+    /* Rects, in Wine units, where the window surface shows above the
+       client views, and a layer for each. */
+    NSData* clientOverlayRects;
+    NSMutableArray<CALayer*>* clientOverlayLayers;
+
     NSMutableArray* glContexts;
     NSMutableArray* pendingGlContexts;
     BOOL _everHadGLContext;
@@ -416,6 +421,8 @@ static inline BOOL stage_manager_enabled(void)
         [pendingGlContexts release];
         [_caLayerHosts release];
         [offsetImageLayer release];
+        [clientOverlayRects release];
+        [clientOverlayLayers release];
         CGImageRelease(colorImage);
         CGImageRelease(shapeImage);
         [super dealloc];
@@ -453,7 +460,6 @@ static inline BOOL stage_manager_enabled(void)
         maskedImage = shapeImage ? CGImageCreateWithMask(colorImage, shapeImage)
                                  : CGImageRetain(colorImage);
         image = CGImageCreateWithImageInRect(maskedImage, imageRect);
-        CGImageRelease(maskedImage);
 
         if (image)
         {
@@ -507,6 +513,88 @@ static inline BOOL stage_manager_enabled(void)
                 [window invalidateShadow];
             }
         }
+
+        [self updateClientOverlayWithImage:maskedImage];
+        CGImageRelease(maskedImage);
+    }
+
+    /* Show the window surface above the client views where child windows
+       that draw into it lie above a client view of DXMT or mtld3d, as the
+       client overlay of the window data has it.  Each part goes into a
+       layer of its own, so the client views stay out of any offscreen pass
+       and the Metal layer goes direct to the display again once no part is
+       left. */
+    - (void) updateClientOverlayWithImage:(CGImageRef)surfaceImage
+    {
+        CALayer* layer = [self layer];
+        const CGRect* rects = [clientOverlayRects bytes];
+        NSUInteger i, count = [clientOverlayRects length] / sizeof(*rects);
+        CGRect imageBounds = CGRectZero;
+
+        if (!count && !clientOverlayLayers.count)
+            return;
+
+        if (surfaceImage)
+            imageBounds = CGRectMake(0, 0, CGImageGetWidth(surfaceImage), CGImageGetHeight(surfaceImage));
+
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        while (clientOverlayLayers.count > count)
+        {
+            [clientOverlayLayers.lastObject removeFromSuperlayer];
+            [clientOverlayLayers removeLastObject];
+        }
+        if (count && !clientOverlayLayers)
+            clientOverlayLayers = [[NSMutableArray alloc] init];
+        for (i = 0; i < count; i++)
+        {
+            CGRect frame = cgrect_mac_from_win(rects[i]), part;
+            CALayer* overlay;
+            CGImageRef image;
+
+            if (i == clientOverlayLayers.count)
+            {
+                overlay = [CALayer layer];
+                overlay.anchorPoint = CGPointZero;
+                /* above the client views and below the black bars of setMask: */
+                overlay.zPosition = 0.5;
+                [layer addSublayer:overlay];
+                [clientOverlayLayers addObject:overlay];
+            }
+            overlay = clientOverlayLayers[i];
+
+            /* the part of the surface image under the rect, in pixels */
+            part = CGRectOffset(frame, -surfaceRect.origin.x, -surfaceRect.origin.y);
+            part = CGRectMake(part.origin.x * layer.contentsScale, part.origin.y * layer.contentsScale,
+                              part.size.width * layer.contentsScale, part.size.height * layer.contentsScale);
+            part = CGRectIntersection(CGRectIntegral(part), imageBounds);
+            if (CGRectIsEmpty(part))
+            {
+                overlay.contents = nil;
+                continue;
+            }
+            image = CGImageCreateWithImageInRect(surfaceImage, part);
+
+            frame = CGRectMake(surfaceRect.origin.x + part.origin.x / layer.contentsScale,
+                               surfaceRect.origin.y + part.origin.y / layer.contentsScale,
+                               part.size.width / layer.contentsScale, part.size.height / layer.contentsScale);
+            if (!layer.geometryFlipped)
+                frame.origin.y = NSHeight(layer.bounds) - frame.origin.y - frame.size.height;
+
+            overlay.contentsScale = layer.contentsScale;
+            overlay.minificationFilter = layer.minificationFilter;
+            overlay.magnificationFilter = layer.magnificationFilter;
+            overlay.frame = frame;
+            overlay.contents = (id)image;
+            CGImageRelease(image);
+        }
+        [CATransaction commit];
+    }
+
+    - (void) setClientOverlayRects:(NSData*)rects
+    {
+        [clientOverlayRects release];
+        clientOverlayRects = [rects retain];
     }
 
     - (void) setSurfaceRect:(CGRect)rect
@@ -3646,6 +3734,28 @@ void macdrv_window_set_shape_pending(WineWindow *window, bool pending)
 {
     OnMainThreadAsync(^{
         [window setShapePending:pending];
+    });
+}
+}
+
+/***********************************************************************
+ *              macdrv_window_set_client_overlay
+ *
+ * Set the rects (in non-client area coordinates) where the window surface
+ * shows above the client views.
+ */
+void macdrv_window_set_client_overlay(WineWindow *window, const CGRect *rects, unsigned int count)
+{
+@autoreleasepool
+{
+    NSData *data = count ? [[NSData alloc] initWithBytes:rects length:count * sizeof(*rects)] : nil;
+
+    OnMainThreadAsync(^{
+        WineContentView *view = [window contentView];
+
+        [view setClientOverlayRects:data];
+        [view setNeedsDisplay:YES];
+        [data release];
     });
 }
 }
