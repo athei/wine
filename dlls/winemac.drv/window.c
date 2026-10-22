@@ -1237,12 +1237,422 @@ static WineContentView *find_client_view_above(HWND hwnd, HWND toplevel, HWND *a
     return ret;
 }
 
+/* client surfaces created through macdrv_functions, guarded by the window data lock */
+static unsigned int d3dmetal_surface_count;
+
+/* one bit each in client_overlay.pending */
+#define MAX_CLIENT_OVERLAY_RECTS 32
+
+static struct macdrv_client_surface *get_d3dmetal_client_view_surface(const struct macdrv_win_data *data);
+
+struct overlay_window
+{
+    HWND         chain[32];         /* the window and its ancestors */
+    unsigned int count;
+    DWORD        style;
+    RECT         rect;              /* window rect in the toplevel's content view, clipped by the ancestors */
+    POINT        origin;            /* top left of the window rect there, not clipped */
+    RECT         view_rect;         /* frame of the client view, if the window has one */
+    HRGN         region;            /* window region there, if the window has one */
+    bool         client_view;
+    bool         presenting;        /* is_d3dmetal_client_view_presenting */
+};
+
+struct overlay_window_list
+{
+    unsigned int           count;
+    struct overlay_window *windows;
+};
+
+static void collect_overlay_window(const void *key, const void *value, void *context)
+{
+    struct macdrv_win_data *data = (struct macdrv_win_data *)value;
+    struct overlay_window_list *list = context;
+    struct overlay_window *window = &list->windows[list->count++];
+
+    window->chain[0] = data->hwnd;
+    window->client_view = !!data->client_view;
+    if ((window->presenting = is_d3dmetal_client_view_presenting(data)))
+        window->view_rect = get_d3dmetal_client_view_surface(data)->view_rect;
+}
+
+/* Get the window rect and the client rect of a window in its toplevel's
+ * content view, the space of the client view frames, clipped by the client
+ * rects of its ancestors, and the top left of its window rect there. The
+ * caller holds the window data lock. */
+static bool get_content_view_rects(const HWND *chain, unsigned int count, RECT *window, RECT *client,
+                                   POINT *origin)
+{
+    const struct macdrv_win_data *data;
+    unsigned int i;
+
+    if (!(data = CFDictionaryGetValue(win_datas, chain[0]))) return false;
+    *window = data->rects.window;
+    *client = data->rects.client;
+    origin->x = window->left;
+    origin->y = window->top;
+    for (i = 1; i < count; i++)
+    {
+        if (!(data = CFDictionaryGetValue(win_datas, chain[i]))) return false;
+        OffsetRect(window, data->rects.client.left, data->rects.client.top);
+        OffsetRect(client, data->rects.client.left, data->rects.client.top);
+        origin->x += data->rects.client.left;
+        origin->y += data->rects.client.top;
+        intersect_rect(window, window, &data->rects.client);
+        intersect_rect(client, client, &data->rects.client);
+    }
+    OffsetRect(window, -data->rects.visible.left, -data->rects.visible.top);
+    OffsetRect(client, -data->rects.visible.left, -data->rects.visible.top);
+    origin->x -= data->rects.visible.left;
+    origin->y -= data->rects.visible.top;
+    return true;
+}
+
+/* Get the window region of a window, if it has one, in its toplevel's
+ * content view. The window data lock must not be held. */
+static HRGN get_content_view_region(const struct overlay_window *window)
+{
+    HWND hwnd = window->chain[0];
+    HRGN hrgn = NtGdiCreateRectRgn(0, 0, 0, 0), ret = 0;
+    float scale = (float)NtUserGetWinMonitorDpi(hwnd, MDT_RAW_DPI) / NtUserGetDpiForWindow(hwnd);
+    XFORM xform = {scale, 0, 0, scale, window->origin.x, window->origin.y};
+    RGNDATA *data;
+    DWORD size;
+
+    /* the region is relative to the window rect, at the window's DPI */
+    if (NtUserGetWindowRgnEx(hwnd, hrgn, 0) != ERROR && (size = NtGdiGetRegionData(hrgn, 0, NULL)) &&
+        (data = malloc(size)))
+    {
+        if (NtGdiGetRegionData(hrgn, size, data)) ret = NtGdiExtCreateRegion(&xform, size, data);
+        free(data);
+    }
+    NtGdiDeleteObjectApp(hrgn);
+    return ret;
+}
+
+static struct overlay_window *find_overlay_window(struct overlay_window *windows, unsigned int count, HWND hwnd)
+{
+    unsigned int i;
+
+    for (i = 0; i < count; i++)
+        if (windows[i].count && windows[i].chain[0] == hwnd) return &windows[i];
+    return NULL;
+}
+
+/* Pass the rects of the client overlay that no flush waits for to the Cocoa
+ * window. The caller holds the window data. */
+static void show_client_overlay(struct macdrv_win_data *data)
+{
+    struct client_overlay *overlay = &data->client_overlay;
+    CGRect shown[MAX_CLIENT_OVERLAY_RECTS];
+    unsigned int i, count = 0;
+
+    for (i = 0; i < overlay->count; i++)
+        if (!(overlay->pending & (1u << i))) shown[count++] = overlay->rects[i];
+    macdrv_window_set_client_overlay(data->cocoa_window, shown, count);
+}
+
+/* Set the rects of the client overlay of a toplevel. A rect that lies
+ * inside one that shows already shows at once. Any other waits for a flush
+ * to paint it if it meets the area of a window that may not have painted
+ * its new place yet, or a rect that still waits, so a child window that
+ * was just shown does not show unpainted. A child that does not paint
+ * after it is shown or moved keeps its rects waiting until a flush paints
+ * into them. The caller holds the window data. */
+static void set_client_overlay(struct macdrv_win_data *data, const CGRect *rects, unsigned int count)
+{
+    struct client_overlay *overlay = &data->client_overlay;
+    CGRect *copy = NULL;
+    unsigned int i, j, pending = 0;
+    bool shown;
+
+    if (count == overlay->count && (!count || !memcmp(rects, overlay->rects, count * sizeof(*rects))))
+        return;
+    if (count && !(copy = malloc(count * sizeof(*copy)))) return;
+
+    for (i = 0; i < count; i++)
+    {
+        copy[i] = rects[i];
+        for (j = 0, shown = false; j < overlay->count && !shown; j++)
+            shown = !(overlay->pending & (1u << j)) && CGRectContainsRect(overlay->rects[j], rects[i]);
+        if (shown) continue;
+        if (CGRectIntersectsRect(rects[i], overlay->unpainted)) pending |= 1u << i;
+        for (j = 0; j < overlay->count; j++)
+            if ((overlay->pending & (1u << j)) && CGRectIntersectsRect(overlay->rects[j], rects[i]))
+                pending |= 1u << i;
+    }
+
+    TRACE("%p: %u rects, pending %#x\n", data->hwnd, count, pending);
+    for (i = 0; i < count; i++) TRACE("    %s\n", wine_dbgstr_cgrect(rects[i]));
+    free(overlay->rects);
+    overlay->rects = copy;
+    overlay->count = count;
+    overlay->pending = pending;
+    show_client_overlay(data);
+}
+
+/***********************************************************************
+ *              update_client_overlay
+ *
+ * Child windows without a client view of their own draw into the window
+ * surface of their toplevel, which shows below every client view. On
+ * Windows, the presents of a window with WS_CLIPCHILDREN leave out its
+ * children, and those of a window with WS_CLIPSIBLINGS leave out its
+ * siblings above it, and so do those of its descendants, as the server
+ * clips visible regions: not for windows with WS_EX_TRANSPARENT, and only
+ * within window regions. Find those parts of the client views of DXMT and
+ * mtld3d, less any client view above them, for the window surface to show
+ * there above the client views. Do it for the toplevel of hwnd, which may
+ * not have painted its new place yet if unpainted is set. The window data
+ * lock must not be held.
+ */
+static void update_client_overlay(HWND hwnd, bool unpainted)
+{
+    struct overlay_window_list list = {0};
+    struct overlay_window *window, *view, *other, *ancestor;
+    unsigned int i, j, k, surfaces, count, serial, rect_count = 0;
+    struct macdrv_win_data *data;
+    HRGN region, part, rgn;
+    RGNDATA *region_data;
+    const CGRect *rects = NULL;
+    bool presenting = false;
+    HWND toplevel, chain[32];
+    unsigned int chain_count = 0;
+
+    pthread_mutex_lock(&win_data_mutex);
+    surfaces = d3dmetal_surface_count;
+    pthread_mutex_unlock(&win_data_mutex);
+    if (!surfaces || !(toplevel = NtUserGetAncestor(hwnd, GA_ROOT))) return;
+
+    if (unpainted && (chain_count = get_window_ancestors(hwnd, chain, ARRAY_SIZE(chain))) &&
+        (chain[chain_count - 1] != toplevel || !is_chain_visible(chain, chain_count)))
+        chain_count = 0;
+
+    if (!(data = get_win_data(toplevel))) return;
+    /* updates can finish out of order: only the one that started last sets the rects */
+    serial = ++data->client_overlay.serial;
+    if (data->cocoa_window && (list.windows = malloc(CFDictionaryGetCount(win_datas) * sizeof(*list.windows))))
+        CFDictionaryApplyFunction(win_datas, collect_overlay_window, &list);
+    for (i = 0; i < list.count; i++) presenting |= list.windows[i].presenting;
+    if (!presenting && !data->client_overlay.count)
+    {
+        /* no rects to set, so none to hold back for the earlier updates */
+        data->client_overlay.unpainted = CGRectZero;
+        list.count = 0;
+    }
+    /* Keep the place of the window for the update that sets the rects, which
+     * may be another one, from the same moment as the serial. */
+    if (list.count && chain_count)
+    {
+        RECT rect, client;
+        POINT origin;
+
+        if (get_content_view_rects(chain, chain_count, &rect, &client, &origin) && !IsRectEmpty(&rect))
+        {
+            CGRect moved = cgrect_from_rect(rect), *area = &data->client_overlay.unpainted;
+            *area = CGRectIsEmpty(*area) ? moved : CGRectUnion(*area, moved);
+        }
+    }
+    release_win_data(data);
+    if (!list.count)
+    {
+        free(list.windows);
+        return;
+    }
+
+    /* keep the visible windows of the toplevel */
+    for (i = count = 0; i < list.count; i++)
+    {
+        window = &list.windows[count];
+        *window = list.windows[i];
+        if (!(window->count = get_window_ancestors(window->chain[0], window->chain, ARRAY_SIZE(window->chain))))
+            continue;
+        if (window->chain[window->count - 1] != toplevel || !is_chain_visible(window->chain, window->count))
+            continue;
+        window->style = NtUserGetWindowLongW(window->chain[0], GWL_STYLE);
+        count++;
+    }
+
+    /* the client view of DXMT or mtld3d has the frame of its surface */
+    pthread_mutex_lock(&win_data_mutex);
+    for (i = 0; i < count; i++)
+    {
+        RECT client;
+
+        window = &list.windows[i];
+        if (!get_content_view_rects(window->chain, window->count, &window->rect, &client, &window->origin))
+        {
+            window->count = 0;
+            continue;
+        }
+        if (!window->presenting) window->view_rect = client;
+    }
+    pthread_mutex_unlock(&win_data_mutex);
+
+    for (i = 0; i < count; i++)
+    {
+        window = &list.windows[i];
+        window->region = window->count > 1 && !window->client_view ? get_content_view_region(window) : 0;
+    }
+
+    region = NtGdiCreateRectRgn(0, 0, 0, 0);
+    part = NtGdiCreateRectRgn(0, 0, 0, 0);
+    rgn = NtGdiCreateRectRgn(0, 0, 0, 0);
+    for (i = 0; i < count; i++)
+    {
+        bool found = false;
+
+        window = &list.windows[i];
+        if (window->count < 2 || window->client_view) continue;
+
+        NtGdiSetRectRgn(part, 0, 0, 0, 0);
+        for (j = 0; j < count; j++)
+        {
+            unsigned int depth = window->count, view_depth;
+            RECT rect;
+
+            view = &list.windows[j];
+            if (!view->count || !view->presenting) continue;
+
+            /* Find the window, or its ancestor, that is a child of the view's
+             * window, or a sibling of it or of one of its ancestors. */
+            view_depth = view->count;
+            while (depth > 1 && view_depth > 1 && window->chain[depth - 2] == view->chain[view_depth - 2])
+            {
+                depth--;
+                view_depth--;
+            }
+            if (depth == 1) continue; /* the window holds the view */
+            if (view_depth == 1)
+            {
+                if (!(view->style & WS_CLIPCHILDREN)) continue;
+            }
+            else if (!(NtUserGetWindowLongW(view->chain[view_depth - 2], GWL_STYLE) & WS_CLIPSIBLINGS) ||
+                     !is_sibling_above(window->chain[depth - 2], view->chain[view_depth - 2]))
+                continue;
+            if (NtUserGetWindowLongW(window->chain[depth - 2], GWL_EXSTYLE) & WS_EX_TRANSPARENT) continue;
+
+            if (!intersect_rect(&rect, &window->rect, &view->view_rect)) continue;
+            NtGdiSetRectRgn(rgn, rect.left, rect.top, rect.right, rect.bottom);
+            /* the window regions of the window and of its ancestors up to there clip it */
+            for (k = 0; k <= depth - 2; k++)
+                if ((ancestor = find_overlay_window(list.windows, count, window->chain[k])) && ancestor->region)
+                    NtGdiCombineRgn(rgn, rgn, ancestor->region, RGN_AND);
+            NtGdiCombineRgn(part, part, rgn, RGN_OR);
+            found = true;
+        }
+        if (!found) continue;
+
+        for (j = 0; j < count; j++)
+        {
+            other = &list.windows[j];
+            if (!other->count || !other->client_view || IsRectEmpty(&other->view_rect)) continue;
+            if (!is_window_above(other->chain, other->count, window->chain, window->count)) continue;
+            NtGdiSetRectRgn(rgn, other->view_rect.left, other->view_rect.top,
+                            other->view_rect.right, other->view_rect.bottom);
+            NtGdiCombineRgn(part, part, rgn, RGN_DIFF);
+        }
+        NtGdiCombineRgn(region, region, part, RGN_OR);
+    }
+    for (i = 0; i < count; i++)
+        if (list.windows[i].region) NtGdiDeleteObjectApp(list.windows[i].region);
+    free(list.windows);
+
+    if ((region_data = get_region_data(region, 0)))
+    {
+        rects = (const CGRect *)region_data->Buffer;
+        rect_count = region_data->rdh.nCount;
+        if (rect_count > MAX_CLIENT_OVERLAY_RECTS)
+        {
+            static int once;
+            if (!once++) WARN("client overlay of %p has %u rects, showing %u\n", toplevel, rect_count,
+                              MAX_CLIENT_OVERLAY_RECTS);
+            rect_count = MAX_CLIENT_OVERLAY_RECTS;
+        }
+    }
+    NtGdiDeleteObjectApp(rgn);
+    NtGdiDeleteObjectApp(part);
+    NtGdiDeleteObjectApp(region);
+
+    if ((data = get_win_data(toplevel)))
+    {
+        if (data->client_overlay.serial != serial)
+            TRACE("%p: a later update sets the rects\n", toplevel);
+        else if (data->cocoa_window)
+        {
+            set_client_overlay(data, rects, rect_count);
+            data->client_overlay.unpainted = CGRectZero;
+        }
+        release_win_data(data);
+    }
+    free(region_data);
+}
+
+/***********************************************************************
+ *              flush_client_overlay
+ *
+ * Show the rects of the client overlay that waited for a flush to paint
+ * them once one has painted into them. A flush comes for each frame while a
+ * child window above a client view of DXMT or mtld3d repaints, as for
+ * an edit control that the game redraws, so this does nothing else. The
+ * caller holds the window data.
+ */
+void flush_client_overlay(struct macdrv_win_data *data, const RECT *dirty)
+{
+    struct client_overlay *overlay = &data->client_overlay;
+    unsigned int i, pending = overlay->pending;
+    CGRect rect;
+
+    if (!pending) return;
+
+    rect = cgrect_from_rect(*dirty);
+    for (i = 0; i < overlay->count; i++)
+        if (CGRectIntersectsRect(rect, overlay->rects[i])) pending &= ~(1u << i);
+    if (pending == overlay->pending) return;
+
+    TRACE("%p: painted %s, pending %#x\n", data->hwnd, wine_dbgstr_rect(dirty), pending);
+    overlay->pending = pending;
+    show_client_overlay(data);
+}
+
+struct overlay_toplevels
+{
+    unsigned int count;
+    HWND         hwnds[16];
+};
+
+static void collect_overlay_toplevel(const void *key, const void *value, void *context)
+{
+    const struct macdrv_win_data *data = value;
+    struct overlay_toplevels *toplevels = context;
+
+    if (data->client_overlay.count && toplevels->count < ARRAY_SIZE(toplevels->hwnds))
+        toplevels->hwnds[toplevels->count++] = data->hwnd;
+}
+
+/* Update every client overlay, for a child window that went away without
+ * being hidden first, whose toplevel is no longer known. The window data
+ * lock must not be held. */
+static void update_client_overlays(void)
+{
+    struct overlay_toplevels toplevels = {0};
+    unsigned int i;
+
+    pthread_mutex_lock(&win_data_mutex);
+    if (d3dmetal_surface_count && win_datas)
+        CFDictionaryApplyFunction(win_datas, collect_overlay_toplevel, &toplevels);
+    pthread_mutex_unlock(&win_data_mutex);
+
+    for (i = 0; i < toplevels.count; i++) update_client_overlay(toplevels.hwnds[i], false);
+}
+
 static void macdrv_client_surface_update(struct client_surface *client)
 {
     struct macdrv_client_surface *surface = impl_from_client_surface(client);
     HWND hwnd = client->hwnd, toplevel = client->toplevel, above_hwnd = NULL;
     WineContentView *above_view = NULL;
     struct macdrv_win_data *data;
+    bool moved;
 
     TRACE("%s\n", debugstr_client_surface(client));
 
@@ -1267,10 +1677,17 @@ static void macdrv_client_surface_update(struct client_surface *client)
         release_win_data(above_data);
     }
 
+    /* DXMT updates its surface for every frame, so only a view that moves
+     * moves the client overlay. */
+    moved = surface->presented && !EqualRect(&surface->view_rect, &client->monitor_rect);
+    surface->view_rect = client->monitor_rect;
+
     macdrv_set_view_frame(surface->cocoa_view, cgrect_from_rect(client->monitor_rect));
     macdrv_set_view_superview(surface->cocoa_view, toplevel == hwnd ? NULL : data->client_view, data->cocoa_window,
                               above_view, NULL);
     release_win_data(data);
+
+    if (moved) update_client_overlay(toplevel, false);
 }
 
 /* Make the surface's cocoa view the one the window shows. Returns whether it
@@ -1288,11 +1705,12 @@ static void macdrv_client_surface_present(struct client_surface *client, HDC hdc
 {
     struct macdrv_client_surface *surface = impl_from_client_surface(client);
     struct macdrv_win_data *data;
-    bool shown;
+    bool shown, presented, update;
 
     TRACE("%s\n", debugstr_client_surface(client));
 
     if (!(data = get_win_data(surface->client.hwnd))) return;
+    presented = surface->presented;
     /* mtld3d presents its surface itself: once when a device attaches, which
      * finds the view that creating the surface showed, and after that only
      * once that surface's device has drawn a frame, to show the view again or
@@ -1302,7 +1720,11 @@ static void macdrv_client_surface_present(struct client_surface *client, HDC hdc
      * present_count and presented. */
     shown = show_client_view(surface, data);
     if (surface->present_count++ || shown) surface->presented = true;
+    /* a view that starts to show frames goes into the client overlay */
+    update = surface->presented && (shown || !presented);
     release_win_data(data);
+
+    if (update) update_client_overlay(surface->client.hwnd, false);
 }
 
 static const struct client_surface_funcs macdrv_client_surface_funcs =
@@ -1446,6 +1868,7 @@ void macdrv_DestroyWindow(HWND hwnd)
 {
     struct macdrv_win_data *data;
     CFMutableArrayRef d3dmetal_client_surfaces;
+    bool child;
 
     TRACE("%p\n", hwnd);
 
@@ -1453,13 +1876,16 @@ void macdrv_DestroyWindow(HWND hwnd)
 
     if (data->drag_event) NtSetEvent(data->drag_event, NULL);
 
+    child = !data->cocoa_window;
     destroy_cocoa_window(data);
 
     d3dmetal_client_surfaces = data->d3dmetal_client_surfaces;
     data->d3dmetal_client_surfaces = NULL;
+    if (d3dmetal_client_surfaces) d3dmetal_surface_count -= CFArrayGetCount(d3dmetal_client_surfaces);
 
     CFDictionaryRemoveValue(win_datas, hwnd);
     release_win_data(data);
+    free(data->client_overlay.rects);
     free(data);
 
     /* Releasing a client surface takes win32u's surface lock, and the other
@@ -1468,6 +1894,10 @@ void macdrv_DestroyWindow(HWND hwnd)
      * while the window data is held: two threads, one destroying its window
      * and one creating, moving or destroying its own, would deadlock. */
     if (d3dmetal_client_surfaces) CFRelease(d3dmetal_client_surfaces);
+
+    /* win32u hides a window before it destroys it, but not the windows of
+     * another thread that it destroys when that thread exits */
+    if (child) update_client_overlays();
 }
 
 
@@ -1918,6 +2348,10 @@ void macdrv_WindowPosChanged(HWND hwnd, HWND insert_after, HWND owner_hint, UINT
 
 done:
     release_win_data(data);
+
+    /* the window may have been shown, hidden, moved or reordered above a
+     * client view, or the client view may have moved */
+    update_client_overlay(hwnd, true);
 }
 
 
@@ -2504,6 +2938,7 @@ static struct dxmt_win_data *dxmt_get_win_data(HWND hwnd)
         data->d3dmetal_client_surfaces = CFArrayCreateMutable(NULL, 0, &callbacks);
     }
     CFArrayAppendValue(data->d3dmetal_client_surfaces, client);
+    d3dmetal_surface_count++;
 
     ret->hwnd = data->hwnd;
     ret->cocoa_window = data->cocoa_window;
@@ -2524,9 +2959,18 @@ static struct dxmt_win_data *dxmt_get_win_data(HWND hwnd)
  */
 bool is_d3dmetal_client_view_presenting(struct macdrv_win_data *data)
 {
+    struct macdrv_client_surface *surface = get_d3dmetal_client_view_surface(data);
+
+    return surface && surface->presented && macdrv_view_has_metal_view(data->client_view);
+}
+
+/* The client surface created through macdrv_functions whose cocoa view is
+ * the window's client view, if any. The caller holds the window data. */
+static struct macdrv_client_surface *get_d3dmetal_client_view_surface(const struct macdrv_win_data *data)
+{
     CFIndex i, count;
 
-    if (!data->client_view || !data->d3dmetal_client_surfaces) return false;
+    if (!data->client_view || !data->d3dmetal_client_surfaces) return NULL;
 
     count = CFArrayGetCount(data->d3dmetal_client_surfaces);
     for (i = 0; i < count; i++)
@@ -2534,10 +2978,9 @@ bool is_d3dmetal_client_view_presenting(struct macdrv_win_data *data)
         struct client_surface *client = (struct client_surface *)CFArrayGetValueAtIndex(data->d3dmetal_client_surfaces, i);
         struct macdrv_client_surface *surface = impl_from_client_surface(client);
 
-        if (surface->cocoa_view == data->client_view)
-            return surface->presented && macdrv_view_has_metal_view(data->client_view);
+        if (surface->cocoa_view == data->client_view) return surface;
     }
-    return false;
+    return NULL;
 }
 
 static void dxmt_release_win_data(struct dxmt_win_data *win_data)
@@ -2585,6 +3028,8 @@ void macdrv_client_surface_presented(const macdrv_event *event)
 {
     struct find_client_surface_ctx ctx = { event->client_surface_presented.client_surface, FALSE };
     struct client_surface *client = event->client_surface_presented.client_surface;
+    bool update = false;
+    HWND hwnd = NULL;
 
     TRACE("client_surface %p\n", client);
 
@@ -2598,9 +3043,13 @@ void macdrv_client_surface_presented(const macdrv_event *event)
     if (win_datas) CFDictionaryApplyFunction(win_datas, find_client_surface, &ctx);
     if (ctx.found)
     {
+        struct macdrv_client_surface *surface = impl_from_client_surface(client);
+
         client_surface_add_ref(client);
         /* the event comes from a frame, see is_d3dmetal_client_view_presenting */
-        impl_from_client_surface(client)->presented = true;
+        update = !surface->presented;
+        surface->presented = true;
+        hwnd = client->hwnd;
     }
     pthread_mutex_unlock(&win_data_mutex);
 
@@ -2611,6 +3060,9 @@ void macdrv_client_surface_presented(const macdrv_event *event)
     }
     client_surface_present(client);
     client_surface_release(client);
+
+    /* a view that starts to show frames goes into the client overlay */
+    if (update) update_client_overlay(hwnd, false);
 }
 
 struct macdrv_functions_table

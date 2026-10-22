@@ -498,6 +498,7 @@ extern void macdrv_set_cocoa_parent_window(WineWindow *window, WineWindow *paren
 extern void macdrv_window_set_color_image(WineWindow *window, CGImageRef image, CGRect rect, CGRect dirty);
 extern void macdrv_window_set_shape_image(WineWindow *window, CGImageRef image, bool covers_view);
 extern void macdrv_window_set_shape_pending(WineWindow *window, bool pending);
+extern void macdrv_window_set_client_overlay(WineWindow *window, const CGRect *rects, unsigned int count);
 extern void macdrv_set_window_shape(WineWindow *window, const CGRect *rects, int count);
 extern void macdrv_set_window_alpha(WineWindow *window, CGFloat alpha);
 extern void macdrv_window_use_per_pixel_alpha(WineWindow *window, bool use_per_pixel_alpha);
