@@ -405,6 +405,8 @@ void opengl_drawable_add_ref( struct opengl_drawable *drawable )
     TRACE( "%s increasing refcount to %u\n", debugstr_opengl_drawable( drawable ), ref );
 }
 
+static BOOL framebuffer_has_target( struct opengl_drawable *drawable );
+
 void opengl_drawable_release( struct opengl_drawable *drawable )
 {
     ULONG ref = InterlockedDecrement( &drawable->ref );
@@ -414,12 +416,15 @@ void opengl_drawable_release( struct opengl_drawable *drawable )
     {
         const struct opengl_funcs *funcs = &display_funcs;
         const struct egl_platform *egl = &display_egl;
+        /* a framebuffer surface shares its client surface with its target, which gives
+         * the client surface back when the framebuffer surface releases it */
+        BOOL shared_client = framebuffer_has_target( drawable );
 
         drawable->funcs->destroy( drawable );
         if (drawable->surface) funcs->p_eglDestroySurface( egl->display, drawable->surface );
         if (drawable->client)
         {
-            use_window_client_surface( drawable->client, FALSE );
+            if (!shared_client) use_window_client_surface( drawable->client, FALSE );
             client_surface_release( drawable->client );
         }
         free( drawable );
@@ -679,6 +684,11 @@ static const struct opengl_drawable_funcs framebuffer_surface_funcs;
 static struct framebuffer_surface *framebuffer_from_opengl_drawable( struct opengl_drawable *base )
 {
     return CONTAINING_RECORD( base, struct framebuffer_surface, base );
+}
+
+static BOOL framebuffer_has_target( struct opengl_drawable *drawable )
+{
+    return drawable->funcs == &framebuffer_surface_funcs && framebuffer_from_opengl_drawable( drawable )->target;
 }
 
 static struct opengl_drawable *get_target( struct opengl_drawable *drawable, struct opengl_context *context )
