@@ -39,12 +39,35 @@ enum {
 };
 
 
+/* Shared by macdrv_start_cocoa_app and run_cocoa_app, which can run after the
+   former gave up waiting for it.  It is reference counted: one reference for
+   macdrv_start_cocoa_app and one for the run loop source whose perform
+   callback is run_cocoa_app.  The fields after lock are guarded by it. */
 struct cocoa_app_startup_info {
     NSConditionLock*    lock;
     unsigned long long  tickcount;
     uint64_t            uptime_ns;
     BOOL                success;
+    BOOL                abandoned;
+    int                 refcount;
 };
+
+
+static const void* retain_startup_info(const void* info)
+{
+    struct cocoa_app_startup_info* startup_info = (struct cocoa_app_startup_info*)info;
+    __atomic_add_fetch(&startup_info->refcount, 1, __ATOMIC_RELAXED);
+    return info;
+}
+
+
+static void release_startup_info(const void* info)
+{
+    struct cocoa_app_startup_info* startup_info = (struct cocoa_app_startup_info*)info;
+    if (__atomic_sub_fetch(&startup_info->refcount, 1, __ATOMIC_ACQ_REL)) return;
+    [startup_info->lock release];
+    free(startup_info);
+}
 
 
 /***********************************************************************
@@ -59,46 +82,62 @@ struct cocoa_app_startup_info {
  * it has successfully started the application by changing the condition
  * of a shared NSConditionLock, passed in via the info parameter.
  *
- * This function never returns.  It's the new permanent home of the
- * main thread.
+ * This function never returns, unless macdrv_start_cocoa_app gave up
+ * waiting for it.  It's the new permanent home of the main thread.
  */
 static void run_cocoa_app(void* info)
 {
     struct cocoa_app_startup_info* startup_info = info;
     NSConditionLock* lock = startup_info->lock;
     BOOL created_app = FALSE;
+    BOOL success = FALSE;
 
-    @autoreleasepool
+    /* The lock is held while the application is set up, so that
+       macdrv_start_cocoa_app, if it times out meanwhile, waits for the
+       result instead of giving up on an application that is starting. */
+    [lock lock];
+    if (startup_info->abandoned)
     {
-        if (!NSApp)
-        {
-            [WineApplication sharedApplication];
-            created_app = TRUE;
-        }
-
-        /* Without a value for this default, AppKit looks up the version it
-           was linked against with NSVersionOfRunTimeLibrary(), which walks
-           the loaded images and can crash if a Wine thread unloads a
-           library at the same time. */
-        [[NSUserDefaults standardUserDefaults] registerDefaults:@{ @"NSUseActiveDisplayForMainScreen": @YES }];
-
-        if ([NSApp respondsToSelector:@selector(setWineController:)])
-        {
-            WineApplicationController* controller = [WineApplicationController sharedController];
-            [NSApp setWineController:controller];
-            [controller computeEventTimeAdjustmentFromTicks:startup_info->tickcount uptime:startup_info->uptime_ns];
-            startup_info->success = TRUE;
-        }
-
-        /* Retain the lock while we're using it, so macdrv_start_cocoa_app()
-           doesn't deallocate it in the middle of us unlocking it. */
-        [lock retain];
-        [lock lock];
-        [lock unlockWithCondition:COCOA_APP_RUNNING];
-        [lock release];
+        /* macdrv_start_cocoa_app has failed already; the process goes on
+           without the Mac driver, so don't start an application for it. */
+        [lock unlock];
+        return;
     }
 
-    if (created_app && startup_info->success)
+    /* If the setup raises an exception, macdrv_start_cocoa_app still gets
+       the lock back, with success unset, instead of waiting for it forever. */
+    @try
+    {
+        @autoreleasepool
+        {
+            if (!NSApp)
+            {
+                [WineApplication sharedApplication];
+                created_app = TRUE;
+            }
+
+            /* Without a value for this default, AppKit looks up the version it
+               was linked against with NSVersionOfRunTimeLibrary(), which walks
+               the loaded images and can crash if a Wine thread unloads a
+               library at the same time. */
+            [[NSUserDefaults standardUserDefaults] registerDefaults:@{ @"NSUseActiveDisplayForMainScreen": @YES }];
+
+            if ([NSApp respondsToSelector:@selector(setWineController:)])
+            {
+                WineApplicationController* controller = [WineApplicationController sharedController];
+                [NSApp setWineController:controller];
+                [controller computeEventTimeAdjustmentFromTicks:startup_info->tickcount uptime:startup_info->uptime_ns];
+                startup_info->success = TRUE;
+            }
+        }
+    }
+    @finally
+    {
+        success = startup_info->success;
+        [lock unlockWithCondition:COCOA_APP_RUNNING];
+    }
+
+    if (created_app && success)
     {
         @autoreleasepool
         {
@@ -121,8 +160,8 @@ int macdrv_start_cocoa_app(unsigned long long tickcount)
 @autoreleasepool
 {
     int ret = -1;
-    CFRunLoopSourceRef source;
-    struct cocoa_app_startup_info startup_info;
+    CFRunLoopSourceRef source = NULL;
+    struct cocoa_app_startup_info* startup_info;
     uint64_t uptime_mach = mach_absolute_time();
     mach_timebase_info_data_t mach_timebase;
     NSDate* timeLimit;
@@ -134,35 +173,56 @@ int macdrv_start_cocoa_app(unsigned long long tickcount)
                              toTarget:[NSThread class]
                            withObject:nil];
 
-    startup_info.lock = [[NSConditionLock alloc] initWithCondition:COCOA_APP_NOT_RUNNING];
-    startup_info.tickcount = tickcount;
-    startup_info.success = FALSE;
+    if (!(startup_info = calloc(1, sizeof(*startup_info))))
+        return -1;
+    startup_info->refcount = 1;
+    startup_info->lock = [[NSConditionLock alloc] initWithCondition:COCOA_APP_NOT_RUNNING];
+    startup_info->tickcount = tickcount;
 
     mach_timebase_info(&mach_timebase);
-    startup_info.uptime_ns = uptime_mach * mach_timebase.numer / mach_timebase.denom;
+    startup_info->uptime_ns = uptime_mach * mach_timebase.numer / mach_timebase.denom;
 
     timeLimit = [NSDate dateWithTimeIntervalSinceNow:5];
 
-    source_context.info = &startup_info;
+    /* The source holds its own reference to startup_info, so run_cocoa_app
+       can still use it when it runs after this function gave up. */
+    source_context.info = startup_info;
+    source_context.retain = retain_startup_info;
+    source_context.release = release_startup_info;
     source_context.perform = run_cocoa_app;
-    source = CFRunLoopSourceCreate(NULL, 0, &source_context);
+    if (startup_info->lock)
+        source = CFRunLoopSourceCreate(NULL, 0, &source_context);
 
-    if (source && startup_info.lock && timeLimit)
+    if (source && timeLimit)
     {
         CFRunLoopAddSource(CFRunLoopGetMain(), source, kCFRunLoopCommonModes);
         CFRunLoopSourceSignal(source);
         CFRunLoopWakeUp(CFRunLoopGetMain());
 
-        if ([startup_info.lock lockWhenCondition:COCOA_APP_RUNNING beforeDate:timeLimit])
+        if ([startup_info->lock lockWhenCondition:COCOA_APP_RUNNING beforeDate:timeLimit])
         {
-            [startup_info.lock unlock];
-            ret = !startup_info.success;
+            ret = !startup_info->success;
+            [startup_info->lock unlock];
+        }
+        else
+        {
+            /* The main thread has not set up the application in time.  If it
+               is doing so right now, this waits for it to finish; otherwise
+               it must not start an application later. */
+            [startup_info->lock lock];
+            if ([startup_info->lock condition] == COCOA_APP_RUNNING)
+                ret = !startup_info->success;
+            else
+                startup_info->abandoned = TRUE;
+            [startup_info->lock unlock];
+            if (startup_info->abandoned)
+                CFRunLoopSourceInvalidate(source);
         }
     }
 
     if (source)
         CFRelease(source);
-    [startup_info.lock release];
+    release_startup_info(startup_info);
     return ret;
 }
 }
