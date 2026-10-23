@@ -223,6 +223,7 @@ struct egl_platform
     EGLDisplay           display;
     UINT                 config_count;
     EGLConfig           *configs;
+    BOOLEAN             *config_srgb;   /* whether each config can make an sRGB surface */
     BOOLEAN              extensions[GL_EXTENSION_COUNT]; /* supported EGL extensions */
 
     /* WGL_WINE_query_renderer info */
