@@ -1346,9 +1346,12 @@ static void __attribute__((used)) dispatch_apc( void (CALLBACK *func)(ULONG_PTR,
                                                 ULONG_PTR arg1, ULONG_PTR arg2, ULONG_PTR arg3,
                                                 BOOLEAN alertable, ARM64_NT_CONTEXT *arm_ctx )
 {
+    /* with QUEUE_USER_APC_CALLBACK_DATA_CONTEXT, arg2 points to the callback data after the context */
+    APC_CALLBACK_DATA *callback_data = (APC_CALLBACK_DATA *)(arm_ctx + 1);
     ARM64EC_NT_CONTEXT context;
 
     context_arm_to_x64( &context, arm_ctx );
+    if (arg2 == (ULONG_PTR)callback_data) callback_data->ContextRecord = &context.AMD64_Context;
     func( arg1, arg2, arg3, &context.AMD64_Context );
     NtContinue( &context.AMD64_Context, alertable );
 }
