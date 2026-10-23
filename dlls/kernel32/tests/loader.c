@@ -4919,6 +4919,7 @@ static void test_Wow64Transition(void)
     status = NtQueryVirtualMemory(GetCurrentProcess(), *pWow64Transition,
                                   MemoryMappedFilenameInformation, name, sizeof(buffer), NULL);
     ok(!status, "got %#lx\n", status);
+    if (status) return;
     filepart = name->SectionFileName.Buffer + name->SectionFileName.Length / sizeof(WCHAR);
     while (*filepart != '\\') --filepart;
     ok(!wcsnicmp(filepart, L"\\wow64cpu.dll", wcslen(L"\\wow64cpu.dll")), "got file name %s\n",
