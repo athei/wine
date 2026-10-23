@@ -127,6 +127,7 @@ struct thread_data
     void        *start;             /* thread entry point */
     void        *param;             /* thread entry point parameter */
     struct list  entry;             /* entry in TEB list */
+    ULONG_PTR    breakpoint_pc;     /* instruction pointer of an x64 breakpoint backed up for the handlers */
     const struct msync_wait *msync_wait; /* wait the thread has registered with the msync server */
     char         debug_info[0x800]; /* debug_info structure */
     char         signal_stack[];    /* signal stack */
