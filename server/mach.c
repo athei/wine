@@ -420,6 +420,7 @@ int write_process_memory( struct process *process, client_ptr_t ptr, data_size_t
     kern_return_t ret;
     mach_port_t process_port = get_process_port( process );
     mach_vm_offset_t data;
+    int partial = 0;
 
     if (written) *written = 0;
 
@@ -483,7 +484,7 @@ int write_process_memory( struct process *process, client_ptr_t ptr, data_size_t
          */
         if (!is_rosetta() && !(info.protection & VM_PROT_WRITE))
         {
-            ret = KERN_PROTECTION_FAILURE;
+            partial = 1;
             goto out;
         }
 
@@ -511,7 +512,7 @@ int write_process_memory( struct process *process, client_ptr_t ptr, data_size_t
             /* FIXME: See the above Rosetta remark. */
             if (!is_rosetta() && !(info.protection & VM_PROT_WRITE))
             {
-                ret = KERN_PROTECTION_FAILURE;
+                partial = 1;
                 break;
             }
 
@@ -540,9 +541,10 @@ int write_process_memory( struct process *process, client_ptr_t ptr, data_size_t
 
 out:
     free( (void *)data );
-    mach_set_error( ret );
-    if (ret == KERN_SUCCESS && written) *written = size;
-    return (ret == KERN_SUCCESS);
+    if (partial) set_error( STATUS_PARTIAL_COPY );
+    else mach_set_error( ret );
+    if (!partial && ret == KERN_SUCCESS && written) *written = size;
+    return (ret == KERN_SUCCESS && !partial);
 }
 
 #endif  /* USE_MACH */
