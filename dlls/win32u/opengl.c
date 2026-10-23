@@ -1943,13 +1943,17 @@ static void init_device_info( struct egl_platform *egl, const struct opengl_func
 
         funcs->p_eglMakeCurrent( egl->display, EGL_NO_SURFACE, EGL_NO_SURFACE, context );
 
-        renderer = strdup( (const char *)funcs->p_glGetString( GL_RENDERER ) );
-        egl->device_name = gpu_device_name( egl->vendor_id, egl->device_id, renderer );
-        if (egl->device_name != renderer) free( renderer );
+        if ((str = (const char *)funcs->p_glGetString( GL_RENDERER )) && (renderer = strdup( str )))
+        {
+            egl->device_name = gpu_device_name( egl->vendor_id, egl->device_id, renderer );
+            if (egl->device_name != renderer) free( renderer );
+        }
 
-        vendor = strdup( (const char *)funcs->p_glGetString( GL_VENDOR ) );
-        egl->vendor_name = opengl_vendor_to_name( egl->vendor_id, vendor );
-        if (egl->vendor_name != vendor) free( vendor );
+        if ((str = (const char *)funcs->p_glGetString( GL_VENDOR )) && (vendor = strdup( str )))
+        {
+            egl->vendor_name = opengl_vendor_to_name( egl->vendor_id, vendor );
+            if (egl->vendor_name != vendor) free( vendor );
+        }
 
         TRACE( "  - device_name: %s\n", debugstr_a( egl->device_name ) );
         TRACE( "  - vendor_name: %s\n", debugstr_a( egl->vendor_name ) );
@@ -3618,6 +3622,8 @@ BOOL get_opengl_gpus( struct list *gpus )
     {
         struct gpu_info *gpu;
 
+        /* no context could be made current on the device to read its name */
+        if (!egl->device_name) continue;
         if (!(gpu = calloc( 1, sizeof(*gpu) ))) break;
         memcpy( &gpu->uuid, &egl->device_uuid, sizeof(egl->device_uuid) );
         gpu->name = strdup( egl->device_name );
