@@ -1898,8 +1898,10 @@ static void init_device_info( struct egl_platform *egl, const struct opengl_func
     if (!(context = funcs->p_eglCreateContext( egl->display, config, EGL_NO_CONTEXT, NULL )))
     {
         WARN( "Unable to create a context, ignoring device\n" );
-        funcs->p_eglTerminate( egl->display );
         list_remove( &egl->entry );
+        /* the display device is static, and its display stays in use */
+        if (egl == &display_egl) return;
+        funcs->p_eglTerminate( egl->display );
         free( egl );
         return;
     }
