@@ -220,6 +220,18 @@ static void CALLBACK apc_func( ULONG_PTR arg1, ULONG_PTR arg2, ULONG_PTR arg3 )
 }
 
 #if defined(__i386__) || defined(__x86_64__)
+/* TRUE when this x86 code runs under an emulator on an ARM64 host, whether that is
+ * Wine with FEX or Windows on ARM */
+static BOOL is_arm64_host(void)
+{
+    BOOL (WINAPI *pIsWow64Process2)( HANDLE, USHORT *, USHORT * );
+    USHORT process_machine, native_machine;
+
+    pIsWow64Process2 = (void *)GetProcAddress( GetModuleHandleA( "kernel32.dll" ), "IsWow64Process2" );
+    return pIsWow64Process2 && pIsWow64Process2( GetCurrentProcess(), &process_machine, &native_machine )
+           && native_machine == IMAGE_FILE_MACHINE_ARM64;
+}
+
 static void test_debugger_xstate(HANDLE thread, CONTEXT *ctx, enum debugger_stages stage)
 {
     char context_buffer[sizeof(CONTEXT) + sizeof(CONTEXT_EX) + sizeof(XSTATE) + 3072];
@@ -12344,6 +12356,15 @@ static void test_set_live_context(void)
     /* jmp to self at offset 0 and 4 */
     static const char target_code[] = {0xeb, 0xfe, 0x90, 0x90, 0xeb, 0xfe};
 
+    if (is_arm64_host())
+    {
+        /* FEX checks for a suspend only at block entries and unconditional backward branches,
+         * so it can't stop a thread spinning in "while (!exit_ip_test);". This also skips the
+         * test on Windows on ARM. */
+        skip( "Can't suspend a spinning thread under the x86 emulator on ARM64, skipping.\n" );
+        return;
+    }
+
     target_ptr = VirtualAlloc( NULL, 65536, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE );
     memcpy( target_ptr, target_code, sizeof(target_code) );
     target = (UINT_PTR)target_ptr;
@@ -12614,6 +12635,18 @@ static void test_context_exception_request(void)
     ret = GetThreadContext( GetCurrentThread(), &c );
     ok( ret, "got error %lu.\n", GetLastError() );
     ok( c.ContextFlags == expected_flags, "got %#lx.\n", c.ContextFlags );
+
+#if defined(__i386__) || defined(__x86_64__)
+    if (is_arm64_host())
+    {
+        /* FEX checks for a suspend only at block entries and unconditional backward branches,
+         * so SuspendThread() can't stop the test thread while it spins in
+         * "while (ReadAcquire( &p->sync ) != 2);". The x86 emulator on ARM64 also can't switch
+         * to 64-bit code with a far return. This also skips the test on Windows on ARM. */
+        skip( "Can't suspend a spinning thread under the x86 emulator on ARM64, skipping thread tests.\n" );
+        return;
+    }
+#endif
 
     p.event = CreateEventW( NULL, FALSE, FALSE, NULL );
     thread = CreateThread( NULL, 0, test_context_exception_request_thread, &p, CREATE_SUSPENDED, NULL );
