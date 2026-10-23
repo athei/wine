@@ -1236,6 +1236,61 @@ static const struct pixel_format_flags
     { .flags = 0, /* offscreen */ .srgb = FALSE },
 };
 
+static BOOLEAN egl_config_has_srgb( const struct egl_platform *egl, EGLConfig config )
+{
+    static const EGLint attribs[] = {EGL_WIDTH, 1, EGL_HEIGHT, 1, EGL_GL_COLORSPACE, EGL_GL_COLORSPACE_SRGB, EGL_NONE};
+    const struct opengl_funcs *funcs = &display_funcs;
+    EGLint surface_type = 0;
+    EGLSurface surface;
+
+    /* without a way to ask, keep offering sRGB */
+    if (!egl->extensions[EGL_KHR_gl_colorspace]) return TRUE;
+    funcs->p_eglGetConfigAttrib( egl->display, config, EGL_SURFACE_TYPE, &surface_type );
+    if (!(surface_type & EGL_PBUFFER_BIT)) return TRUE;
+
+    if (!(surface = funcs->p_eglCreatePbufferSurface( egl->display, config, attribs ))) return FALSE;
+    funcs->p_eglDestroySurface( egl->display, surface );
+    return TRUE;
+}
+
+/* Find which configs can make an sRGB surface. Some, such as the 10-bit ones
+ * in Mesa, have no sRGB variant. Whether a config has one depends on its
+ * color buffer, so ask one config of each color buffer layout. */
+static void init_egl_config_srgb( struct egl_platform *egl )
+{
+    static const EGLint names[] = {EGL_RED_SIZE, EGL_GREEN_SIZE, EGL_BLUE_SIZE, EGL_ALPHA_SIZE,
+                                   EGL_COLOR_COMPONENT_TYPE_EXT};
+    const struct opengl_funcs *funcs = &display_funcs;
+    struct { EGLint attribs[ARRAY_SIZE(names)]; BOOLEAN srgb; } known[16];
+    UINT i, k, known_count = 0, probed = 0;
+
+    if (!(egl->config_srgb = malloc( egl->config_count * sizeof(*egl->config_srgb) ))) return;
+
+    for (i = 0; i < egl->config_count; i++)
+    {
+        EGLint attribs[ARRAY_SIZE(names)] = {0};
+
+        for (k = 0; k < ARRAY_SIZE(names); k++)
+            funcs->p_eglGetConfigAttrib( egl->display, egl->configs[i], names[k], &attribs[k] );
+        for (k = 0; k < known_count; k++) if (!memcmp( known[k].attribs, attribs, sizeof(attribs) )) break;
+
+        if (k < known_count) egl->config_srgb[i] = known[k].srgb;
+        else
+        {
+            egl->config_srgb[i] = egl_config_has_srgb( egl, egl->configs[i] );
+            probed++;
+            if (known_count < ARRAY_SIZE(known))
+            {
+                memcpy( known[known_count].attribs, attribs, sizeof(attribs) );
+                known[known_count++].srgb = egl->config_srgb[i];
+            }
+        }
+        if (!egl->config_srgb[i]) TRACE( "config %u has no sRGB variant\n", i );
+    }
+
+    TRACE( "probed %u of %u configs for sRGB\n", probed, egl->config_count );
+}
+
 static UINT egldrv_init_pixel_formats( UINT *onscreen_count )
 {
     const struct opengl_funcs *funcs = &display_funcs;
@@ -1280,12 +1335,14 @@ static UINT egldrv_init_pixel_formats( UINT *onscreen_count )
 
     egl->configs = configs;
     egl->config_count = count;
+    init_egl_config_srgb( egl );
 
     *onscreen_count = (ARRAY_SIZE(pixel_format_flags) - 1) * count;
     return ARRAY_SIZE(pixel_format_flags) * count;
 }
 
-static BOOL describe_egl_config( EGLConfig config, struct wgl_pixel_format *fmt, const struct pixel_format_flags *alias )
+static BOOL describe_egl_config( EGLConfig config, struct wgl_pixel_format *fmt, const struct pixel_format_flags *alias,
+                                 BOOL srgb )
 {
     const struct opengl_funcs *funcs = &display_funcs;
     struct egl_platform *egl = &display_egl;
@@ -1406,7 +1463,7 @@ static BOOL describe_egl_config( EGLConfig config, struct wgl_pixel_format *fmt,
     fmt->bind_to_texture_rectangle_rgb = GL_TRUE;
     fmt->bind_to_texture_rectangle_rgba = GL_TRUE;
 
-    fmt->framebuffer_srgb_capable = alias->srgb;
+    fmt->framebuffer_srgb_capable = alias->srgb && srgb;
 
     fmt->float_components = GL_FALSE;
 
@@ -1421,7 +1478,8 @@ static BOOL egldrv_describe_pixel_format( int format, struct wgl_pixel_format *d
     int count = egl->config_count;
 
     if (--format < 0 || format >= ARRAY_SIZE(pixel_format_flags) * count) return FALSE;
-    return describe_egl_config( egl->configs[format % count], desc, pixel_format_flags + format / count );
+    return describe_egl_config( egl->configs[format % count], desc, pixel_format_flags + format / count,
+                                !egl->config_srgb || egl->config_srgb[format % count] );
 }
 
 static void egldrv_init_extensions( struct opengl_funcs *funcs, BOOLEAN extensions[GL_EXTENSION_COUNT] )
