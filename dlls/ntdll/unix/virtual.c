@@ -1776,8 +1776,9 @@ static void *map_reserved_area( void *limit_low, void *limit_high, size_t size, 
         for (area = find_mem_area( end ); end > limit_low; end = mem_area_end( --area ))
         {
             if (mem_area_state( area ) != AREA_RESERVED) continue;
-            start = ROUND_ADDR( (char *)mem_area_base( area ) + align_mask, align_mask );
-            if ((char *)end - (char *)start < size) continue;
+            start = ROUND_ADDR( (char *)max( mem_area_base( area ), limit_low ) + align_mask, align_mask );
+            /* the alignment can round the start past the end of the area */
+            if (start >= end || (char *)end - (char *)start < size) continue;
             ptr = ROUND_ADDR( (char *)end - size, align_mask );
             break;
         }
@@ -1790,7 +1791,7 @@ static void *map_reserved_area( void *limit_low, void *limit_high, size_t size, 
             if (mem_area_state( area ) != AREA_RESERVED) continue;
             start = ROUND_ADDR( (char *)start + align_mask, align_mask );
             end = min( limit_high, mem_area_end( area ));
-            if ((char *)end - (char *)start < size) continue;
+            if (start >= end || (char *)end - (char *)start < size) continue;
             ptr = start;
             break;
         }
