@@ -1667,10 +1667,31 @@ NTSTATUS send_debug_event( struct thread_data *data, EXCEPTION_RECORD *rec,
 NTSTATUS WINAPI NtRaiseException( EXCEPTION_RECORD *rec, CONTEXT *context, BOOL first_chance )
 {
     struct thread_data *data = get_thread_data();
-    NTSTATUS status = send_debug_event( data, rec, context, first_chance );
+    NTSTATUS status;
+
+#ifdef __aarch64__
+    /* the debugger sees the last chance of an x64 breakpoint with the instruction
+     * pointer of the first chance, not with the one backed up for the handlers */
+    if (!first_chance && rec->ExceptionCode == EXCEPTION_BREAKPOINT &&
+        data->breakpoint_pc && context->Pc == data->breakpoint_pc)
+    {
+        context->Pc++;
+        data->breakpoint_pc = 0;
+    }
+#endif
+
+    status = send_debug_event( data, rec, context, first_chance );
 
     if (status == DBG_CONTINUE || status == DBG_EXCEPTION_HANDLED)
         return NtContinue( context, FALSE );
+
+#ifdef __aarch64__
+    /* A debugger sees an x64 breakpoint with the instruction pointer after the int3,
+     * the exception handlers see it on the int3. */
+    if (first_chance && status == DBG_EXCEPTION_NOT_HANDLED && rec->ExceptionCode == EXCEPTION_BREAKPOINT &&
+        is_emulated_code( context->Pc ))
+        data->breakpoint_pc = --context->Pc;
+#endif
 
     if (first_chance) return call_user_exception_dispatcher( data, rec, context );
 
