@@ -1687,7 +1687,12 @@ static BOOL init_egl_platform( struct egl_platform *egl, const struct opengl_fun
     EGLint major, minor;
     const char *str;
 
-    if (!egl->display) egl->display = funcs->p_eglGetPlatformDisplay( egl->type, egl->native_display, NULL );
+    /* eglGetPlatformDisplay() is EGL 1.5, which the library may not have; EGL_EXT_platform_base,
+     * which egl_init() requires, has eglGetPlatformDisplayEXT() */
+    if (!egl->display && funcs->p_eglGetPlatformDisplay)
+        egl->display = funcs->p_eglGetPlatformDisplay( egl->type, egl->native_display, NULL );
+    else if (!egl->display && funcs->p_eglGetPlatformDisplayEXT)
+        egl->display = funcs->p_eglGetPlatformDisplayEXT( egl->type, egl->native_display, NULL );
     if (!egl->display)
     {
         WARN( "Failed to open EGL display for type %#x, native display %p\n", egl->type, egl->native_display );
