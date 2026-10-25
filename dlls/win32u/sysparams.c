@@ -2160,7 +2160,7 @@ static DEVMODEW *get_virtual_modes( const DEVMODEW *initial, const DEVMODEW *max
     vertical = initial->dmPelsHeight > initial->dmPelsWidth;
 
     freqs[1] = devmode_get( initial, DM_DISPLAYFREQUENCY );
-    if (freqs[1] <= 60) freqs[1] = 0;
+    if (freqs[1] <= 1 || freqs[1] == 60) freqs[1] = 0;
 
     if (!(screen_sizes = get_screen_sizes( maximum, host_modes, host_modes_count, &sizes_count ))) return NULL;
     modes = malloc( ARRAY_SIZE(freqs) * ARRAY_SIZE(depths) * (sizes_count + 2) * sizeof(*modes) );
