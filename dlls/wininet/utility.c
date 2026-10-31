@@ -96,10 +96,10 @@ server_addr_t *GetAddress(const WCHAR *name, INTERNET_PORT port)
 static int try_create_connect_socket(server_addr_t *addr, int af, DWORD timeout, object_header_t *hdr,
                                      DWORD_PTR callback_context)
 {
-    TIMEVAL timeout_timeval = {0, timeout * 1000};
-    ULONG blocking;
+    TIMEVAL timeout_timeval = {timeout / 1000, timeout % 1000 * 1000};
+    ULONG nonblocking;
     socklen_t len;
-    FD_SET set;
+    FD_SET write_set, except_set;
     DWORD err;
     int res;
     int s;
@@ -114,8 +114,8 @@ static int try_create_connect_socket(server_addr_t *addr, int af, DWORD timeout,
     if ((s = socket(addr->addr.ss_family, SOCK_STREAM, 0)) == -1)
         return -1;
 
-    blocking = 0;
-    ioctlsocket(s, FIONBIO, &blocking);
+    nonblocking = 1;
+    ioctlsocket(s, FIONBIO, &nonblocking);
 
     if (!connect(s, (struct sockaddr *)&addr->addr, addr->addr_len))
         goto done;
@@ -127,9 +127,11 @@ static int try_create_connect_socket(server_addr_t *addr, int af, DWORD timeout,
         return -1;
     }
 
-    FD_ZERO(&set);
-    FD_SET(s, &set);
-    res = select(s + 1, NULL, &set, NULL, timeout == INFINITE ? NULL : &timeout_timeval);
+    FD_ZERO(&write_set);
+    FD_SET(s, &write_set);
+    FD_ZERO(&except_set);
+    FD_SET(s, &except_set);
+    res = select(s + 1, NULL, &write_set, &except_set, timeout == INFINITE ? NULL : &timeout_timeval);
     len = sizeof(res);
     if(!res || res == SOCKET_ERROR || getsockopt(s, SOL_SOCKET, SO_ERROR, (void *)&res, &len) || res)
     {
@@ -138,8 +140,8 @@ static int try_create_connect_socket(server_addr_t *addr, int af, DWORD timeout,
     }
 
 done:
-    blocking = 1;
-    ioctlsocket(s, FIONBIO, &blocking);
+    nonblocking = 0;
+    ioctlsocket(s, FIONBIO, &nonblocking);
     if (hdr)
         INTERNET_SendCallback(hdr, callback_context, INTERNET_STATUS_CONNECTED_TO_SERVER,
                               addr->addr_str, strlen(addr->addr_str) + 1);
