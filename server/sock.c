@@ -1410,7 +1410,8 @@ static void sock_poll_event( struct fd *fd, int event )
         if (event & (POLLERR|POLLHUP))
         {
             sock->state = SOCK_UNCONNECTED;
-            event &= ~POLLOUT;
+            /* kqueue reports a failed connect as POLLHUP without POLLERR. */
+            event = (event & ~POLLOUT) | POLLERR;
         }
         else if (event & POLLOUT)
         {
