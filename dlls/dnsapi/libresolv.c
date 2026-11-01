@@ -325,6 +325,14 @@ static NTSTATUS resolv_query( void *args )
     return ret;
 }
 
+static BOOL is_mdns_name( const char *name )
+{
+    size_t len = strlen( name );
+
+    if (len && name[len - 1] == '.') len--;
+    return len >= 6 && !strncasecmp( name + len - 6, ".local", 6 );
+}
+
 static NTSTATUS get_hostinfo( void *args )
 {
     struct addrinfo hints = { .ai_flags = AI_CANONNAME }, *result, *next;
@@ -338,6 +346,10 @@ static NTSTATUS get_hostinfo( void *args )
     memset( params->ip6, 0, sizeof(*params->ip6) );
 
     if (gethostname( params->name, DNS_MAX_NAME_LENGTH )) return map_h_errno( h_errno );
+
+    /* An mDNS lookup blocks until it times out when nothing answers, and this
+     * runs in DllMain. Without a result, queries for the name fail at once. */
+    if (is_mdns_name( params->name )) return ERROR_SUCCESS;
 
     if (!getaddrinfo( params->name, NULL, &hints, &result ))
     {
