@@ -20,7 +20,6 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
  */
 
-#include <assert.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <math.h>
@@ -189,7 +188,6 @@ static HRESULT DirectSoundDevice_Create(DirectSoundDevice ** ppDevice)
 static void DirectSoundDevice_destroy(DirectSoundDevice *device)
 {
     HRESULT hr;
-        int i;
 
         TRACE("(%p)\n", device);
 
@@ -205,8 +203,9 @@ static void DirectSoundDevice_destroy(DirectSoundDevice *device)
         /* It is allowed to release this object even when buffers are playing */
         if (device->buffers) {
             WARN("%d secondary buffers not released\n", device->nrofbuffers);
-            for( i=0;i<device->nrofbuffers;i++)
-                secondarybuffer_destroy(device->buffers[i]);
+            /* secondarybuffer_destroy() removes the buffer from the list */
+            while (device->nrofbuffers)
+                secondarybuffer_destroy(device->buffers[0]);
         }
 
         hr = DSOUND_PrimaryDestroy(device);
@@ -518,6 +517,12 @@ static HRESULT DirectSoundDevice_DuplicateSoundBuffer(
         return DSERR_INVALIDCALL;
     }
 
+    if (((IDirectSoundBufferImpl *)psb)->dsbd.dwFlags & DSBCAPS_CTRLFX) {
+        WARN("trying to duplicate buffer with DSBCAPS_CTRLFX\n");
+        *ppdsb = NULL;
+        return DSERR_INVALIDCALL;
+    }
+
     /* duplicate the actual buffer implementation */
     hres = IDirectSoundBufferImpl_Duplicate(device, &dsb, (IDirectSoundBufferImpl*)psb);
     if (hres == DS_OK)
@@ -572,21 +577,19 @@ void DirectSoundDevice_RemoveBuffer(DirectSoundDevice * device, IDirectSoundBuff
 
     AcquireSRWLockExclusive(&device->buffer_list_lock);
 
-    if (device->nrofbuffers == 1) {
-        assert(device->buffers[0] == pDSB);
-        free(device->buffers);
-        device->buffers = NULL;
-    } else {
-        for (i = 0; i < device->nrofbuffers; i++) {
-            if (device->buffers[i] == pDSB) {
-                /* Put the last buffer of the list in the (now empty) position */
-                device->buffers[i] = device->buffers[device->nrofbuffers - 1];
-                break;
+    for (i = 0; i < device->nrofbuffers; i++) {
+        if (device->buffers[i] == pDSB) {
+            /* Put the last buffer of the list in the (now empty) position */
+            device->buffers[i] = device->buffers[device->nrofbuffers - 1];
+            device->nrofbuffers--;
+            if (!device->nrofbuffers) {
+                free(device->buffers);
+                device->buffers = NULL;
             }
+            TRACE("buffer count is now %d\n", device->nrofbuffers);
+            break;
         }
     }
-    device->nrofbuffers--;
-    TRACE("buffer count is now %d\n", device->nrofbuffers);
 
     ReleaseSRWLockExclusive(&device->buffer_list_lock);
 }

@@ -372,6 +372,7 @@ static void DSOUND_ChangeListener(IDirectSoundBufferImpl *ds3dl)
 {
 	int i;
 	TRACE("(%p)\n",ds3dl);
+	AcquireSRWLockShared(&ds3dl->device->buffer_list_lock);
 	for (i = 0; i < ds3dl->device->nrofbuffers; i++)
 	{
 		AcquireSRWLockExclusive(&ds3dl->device->buffers[i]->lock);
@@ -382,6 +383,7 @@ static void DSOUND_ChangeListener(IDirectSoundBufferImpl *ds3dl)
 		}
 		ReleaseSRWLockExclusive(&ds3dl->device->buffers[i]->lock);
 	}
+	ReleaseSRWLockShared(&ds3dl->device->buffer_list_lock);
 }
 
 /*******************************************************************************
