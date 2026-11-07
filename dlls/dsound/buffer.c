@@ -1077,6 +1077,9 @@ HRESULT secondarybuffer_create(DirectSoundDevice *device, const DSBUFFERDESC *ds
 		dsb->ds3db_freq = dsbd->lpwfxFormat->nSamplesPerSec;
 
 		dsb->ds3db_need_recalc = FALSE;
+		/* DSOUND_Calc3DBuffer() can return before it recalculates the
+		 * format, and the input tail below is sized from it. */
+		DSOUND_RecalcFormat(dsb);
 		DSOUND_Calc3DBuffer(dsb);
 	} else {
 		DSOUND_RecalcVolPan(&(dsb->volpan));
@@ -1156,20 +1159,12 @@ HRESULT IDirectSoundBufferImpl_Duplicate(
 {
     IDirectSoundBufferImpl *dsb;
     HRESULT hres = DS_OK;
-    void *input_tail;
 
     TRACE("(%p,%p,%p)\n", device, ppdsb, pdsb);
 
     dsb = malloc(sizeof(*dsb));
     if (dsb == NULL) {
         WARN("out of memory\n");
-        *ppdsb = NULL;
-        return DSERR_OUTOFMEMORY;
-    }
-
-    input_tail = malloc(pdsb->pwfx->nChannels * pdsb->input_delay * sizeof(float));
-    if (input_tail == NULL) {
-        free(dsb);
         *ppdsb = NULL;
         return DSERR_OUTOFMEMORY;
     }
@@ -1183,7 +1178,17 @@ HRESULT IDirectSoundBufferImpl_Duplicate(
     ReleaseSRWLockShared(&pdsb->lock);
 
     if (dsb->pwfx == NULL) {
-        free(input_tail);
+        free(dsb);
+        *ppdsb = NULL;
+        return DSERR_OUTOFMEMORY;
+    }
+
+    dsb->device = device;
+    DSOUND_RecalcFormat(dsb);
+
+    dsb->input_tail = malloc(dsb->pwfx->nChannels * dsb->input_delay * sizeof(float));
+    if (dsb->input_tail == NULL) {
+        free(dsb->pwfx);
         free(dsb);
         *ppdsb = NULL;
         return DSERR_OUTOFMEMORY;
@@ -1201,9 +1206,6 @@ HRESULT IDirectSoundBufferImpl_Duplicate(
     dsb->sec_playpos = 0;
     dsb->notifies = NULL;
     dsb->nrofnotifies = 0;
-    dsb->device = device;
-    dsb->input_tail = input_tail;
-    DSOUND_RecalcFormat(dsb);
 
     InitializeSRWLock(&dsb->lock);
 
