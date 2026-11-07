@@ -275,6 +275,7 @@ static HRESULT DSOUND_PrimaryOpen(DirectSoundDevice *device, WAVEFORMATEX *wfx, 
     }
 
     for (i = 0; i < device->nrofbuffers; i++) {
+        free(dsb[i]->input_tail);
         dsb[i]->input_tail = input_tails[i];
         dsb[i]->input_tail_valid = FALSE;
         ReleaseSRWLockExclusive(&dsb[i]->lock);

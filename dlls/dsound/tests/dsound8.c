@@ -1575,7 +1575,7 @@ static void test_effects(void)
     IMediaObject *echo = NULL, *reverb = NULL;
     IDirectSoundBuffer8 *buffer8;
     DSEFFECTDESC effects[2] = {};
-    IDirectSoundBuffer *buffer;
+    IDirectSoundBuffer *buffer, *duplicate;
     IDirectSoundNotify *notify;
     IDirectSound8 *dsound;
     DWORD size1, size2;
@@ -1634,6 +1634,13 @@ static void test_effects(void)
     hr = IDirectSoundBuffer8_SetFX(buffer8, 1, effects, results);
     ok(hr == DS_OK, "Got hr %#lx.\n", hr);
     ok(results[0] == DSFXR_LOCSOFTWARE, "Got result %#lx.\n", results[0]);
+
+    /* Buffers created with DSBCAPS_CTRLFX cannot be duplicated. */
+    duplicate = NULL;
+    hr = IDirectSound8_DuplicateSoundBuffer(dsound, buffer, &duplicate);
+    ok(FAILED(hr), "Got hr %#lx.\n", hr);
+    if (SUCCEEDED(hr))
+        IDirectSoundBuffer_Release(duplicate);
 
     hr = IDirectSoundBuffer8_Lock(buffer8, 0, 0, &ptr1, &size1, &ptr2, &size2, DSBLOCK_ENTIREBUFFER);
     ok(hr == DS_OK, "Got hr %#lx.\n", hr);
@@ -2019,6 +2026,78 @@ static void test_primary_independent(void)
     IDirectSound8_Release(dso1);
 }
 
+static void test_3d_muted_at_max_distance(void)
+{
+    DSBUFFERDESC primary_desc = {.dwSize = sizeof(primary_desc)};
+    DSBUFFERDESC buffer_desc = {.dwSize = sizeof(buffer_desc)};
+    IDirectSound3DListener *listener;
+    IDirectSoundBuffer *primary, *buffer;
+    IDirectSound3DBuffer *buffer3d;
+    IDirectSound8 *dsound;
+    WAVEFORMATEX wfx;
+    DWORD status;
+    HRESULT hr;
+    ULONG ref;
+
+    hr = DirectSoundCreate8(NULL, &dsound, NULL);
+    ok(hr == DS_OK || hr == DSERR_NODRIVER, "Got hr %#lx.\n", hr);
+    if (FAILED(hr))
+        return;
+
+    hr = IDirectSound8_SetCooperativeLevel(dsound, get_hwnd(), DSSCL_PRIORITY);
+    ok(hr == DS_OK, "Got hr %#lx.\n", hr);
+
+    primary_desc.dwFlags = DSBCAPS_PRIMARYBUFFER | DSBCAPS_CTRL3D;
+    hr = IDirectSound8_CreateSoundBuffer(dsound, &primary_desc, &primary, NULL);
+    ok(hr == DS_OK, "Got hr %#lx.\n", hr);
+    hr = IDirectSoundBuffer_QueryInterface(primary, &IID_IDirectSound3DListener, (void **)&listener);
+    ok(hr == DS_OK, "Got hr %#lx.\n", hr);
+
+    /* The new buffer is farther from the listener than its maximum distance,
+     * so it starts out muted. */
+    hr = IDirectSound3DListener_SetPosition(listener, 2.0f * DS3D_DEFAULTMAXDISTANCE, 0.0f, 0.0f,
+            DS3D_IMMEDIATE);
+    ok(hr == DS_OK, "Got hr %#lx.\n", hr);
+
+    init_format(&wfx, WAVE_FORMAT_PCM, 22050, 16, 1);
+    buffer_desc.dwFlags = DSBCAPS_CTRL3D | DSBCAPS_CTRLFREQUENCY | DSBCAPS_CTRLVOLUME
+            | DSBCAPS_MUTE3DATMAXDISTANCE | DSBCAPS_GETCURRENTPOSITION2;
+    buffer_desc.dwBufferBytes = align(wfx.nAvgBytesPerSec * BUFFER_LEN / 1000, wfx.nBlockAlign);
+    buffer_desc.lpwfxFormat = &wfx;
+    hr = IDirectSound8_CreateSoundBuffer(dsound, &buffer_desc, &buffer, NULL);
+    ok(hr == DS_OK, "Got hr %#lx.\n", hr);
+    hr = IDirectSoundBuffer_QueryInterface(buffer, &IID_IDirectSound3DBuffer, (void **)&buffer3d);
+    ok(hr == DS_OK, "Got hr %#lx.\n", hr);
+
+    hr = IDirectSoundBuffer_Play(buffer, 0, 0, DSBPLAY_LOOPING);
+    ok(hr == DS_OK, "Got hr %#lx.\n", hr);
+    Sleep(50);
+
+    /* Bring the buffer within its maximum distance and let it mix. */
+    hr = IDirectSound3DListener_SetPosition(listener, 0.0f, 0.0f, 0.0f, DS3D_IMMEDIATE);
+    ok(hr == DS_OK, "Got hr %#lx.\n", hr);
+    hr = IDirectSound3DBuffer_SetPosition(buffer3d, 1.0f, 0.0f, 0.0f, DS3D_IMMEDIATE);
+    ok(hr == DS_OK, "Got hr %#lx.\n", hr);
+    hr = IDirectSoundBuffer_SetFrequency(buffer, 44100);
+    ok(hr == DS_OK, "Got hr %#lx.\n", hr);
+    Sleep(200);
+
+    hr = IDirectSoundBuffer_GetStatus(buffer, &status);
+    ok(hr == DS_OK, "Got hr %#lx.\n", hr);
+    ok((status & (DSBSTATUS_PLAYING | DSBSTATUS_LOOPING)) == (DSBSTATUS_PLAYING | DSBSTATUS_LOOPING),
+            "Got status %#lx.\n", status);
+
+    hr = IDirectSoundBuffer_Stop(buffer);
+    ok(hr == DS_OK, "Got hr %#lx.\n", hr);
+
+    IDirectSound3DBuffer_Release(buffer3d);
+    IDirectSoundBuffer_Release(buffer);
+    IDirectSound3DListener_Release(listener);
+    IDirectSoundBuffer_Release(primary);
+    ref = IDirectSound8_Release(dsound);
+    ok(!ref, "Got outstanding refcount %lu.\n", ref);
+}
+
 START_TEST(dsound8)
 {
     DWORD cookie;
@@ -2035,6 +2114,7 @@ START_TEST(dsound8)
     test_first_device();
     test_primary_flags();
     test_AcquireResources();
+    test_3d_muted_at_max_distance();
 
     hr = CoRegisterClassObject(&testdmo_clsid, (IUnknown *)&testdmo_cf,
             CLSCTX_INPROC_SERVER, REGCLS_MULTIPLEUSE, &cookie);
