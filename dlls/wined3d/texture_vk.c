@@ -312,6 +312,14 @@ static void wined3d_texture_vk_upload_data(struct wined3d_context *context,
         return;
     }
 
+    /* Some callers don't check whether preparing the location succeeded,
+     * which fails for formats without a Vulkan equivalent. */
+    if (!wined3d_texture_vk(dst_texture)->image.vk_image)
+    {
+        WARN("Texture %p has no Vulkan image.\n", dst_texture);
+        return;
+    }
+
     if (wined3d_resource_get_sample_count(&dst_texture->resource) > 1)
     {
         FIXME("Not supported for multisample textures.\n");
@@ -574,6 +582,12 @@ static void wined3d_texture_vk_download_data(struct wined3d_context *context,
         return;
     }
 
+    if (!wined3d_texture_vk(src_texture)->image.vk_image)
+    {
+        WARN("Texture %p has no Vulkan image.\n", src_texture);
+        return;
+    }
+
     src_level = src_sub_resource_idx % src_texture->level_count;
     src_width = wined3d_texture_get_level_width(src_texture, src_level);
     src_height = wined3d_texture_get_level_height(src_texture, src_level);
@@ -658,7 +672,9 @@ static bool wined3d_texture_vk_clear(struct wined3d_texture_vk *texture_vk,
     VkImageAspectFlags aspect_mask;
     VkImage vk_image;
 
-    if (texture_vk->t.resource.format_attrs & WINED3D_FORMAT_ATTR_COMPRESSED)
+    /* vkCmdClearColorImage() can't clear compressed or planar images. Planar
+     * textures only get here when cleared to zero. */
+    if (texture_vk->t.resource.format_attrs & (WINED3D_FORMAT_ATTR_COMPRESSED | WINED3D_FORMAT_ATTR_PLANAR))
     {
         struct wined3d_bo_address addr;
         struct wined3d_color *c = &sub_resource->clear_value.colour;
@@ -797,6 +813,12 @@ BOOL wined3d_texture_vk_prepare_texture(struct wined3d_texture_vk *texture_vk,
     if (texture_vk->t.flags & WINED3D_TEXTURE_RGB_ALLOCATED)
         return TRUE;
 
+    if (!wined3d_format_vk(texture_vk->t.resource.format)->vk_format)
+    {
+        WARN("Format %s has no Vulkan equivalent.\n", debug_d3dformat(texture_vk->t.resource.format->id));
+        return FALSE;
+    }
+
     if (!(vk_command_buffer = wined3d_context_vk_get_command_buffer(context_vk)))
     {
         ERR("Failed to get command buffer.\n");
@@ -839,7 +861,7 @@ BOOL wined3d_texture_vk_prepare_texture(struct wined3d_texture_vk *texture_vk,
     vk_usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     if (resource->bind_flags & WINED3D_BIND_SHADER_RESOURCE)
         vk_usage |= VK_IMAGE_USAGE_SAMPLED_BIT;
-    if (resource->bind_flags & WINED3D_BIND_RENDER_TARGET)
+    if (wined3d_texture_vk_has_color_attachment_usage(&texture_vk->t))
         vk_usage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
     if (resource->bind_flags & WINED3D_BIND_DEPTH_STENCIL)
         vk_usage |= VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
@@ -1166,6 +1188,7 @@ static void vk_blitter_clear_rendertargets(struct wined3d_context_vk *context_vk
     unsigned int i, attachment_count, immediate_rt_count = 0, delay_count = 0;
     VkClearValue clear_values[WINED3D_MAX_RENDER_TARGETS + 1];
     VkImageView views[WINED3D_MAX_RENDER_TARGETS + 1];
+    unsigned int fb_width = ~0u, fb_height = ~0u;
     struct wined3d_rendertarget_view_vk *rtv_vk;
     struct wined3d_rendertarget_view *view;
     const struct wined3d_vk_info *vk_info;
@@ -1211,6 +1234,10 @@ static void vk_blitter_clear_rendertargets(struct wined3d_context_vk *context_vk
          * the point of the delayed clear. (Unless we are lucky enough that the application
          * draws with the same RTV as it clears.) */
         view_dependent = wined3d_format_is_typeless(texture->resource.format) || texture->swapchain;
+        /* Views of planar textures cover a single plane, and planar images
+         * can't be cleared with vkCmdClearColorImage(). */
+        if (texture->resource.format_attrs & WINED3D_FORMAT_ATTR_PLANAR)
+            view_dependent = true;
 
         if (wined3d_rendertarget_view_is_full_clear(view, draw_rect, clear_rects)
                 && (!view_dependent || (!colour->r && !colour->g && !colour->b && !colour->a)))
@@ -1238,6 +1265,8 @@ static void vk_blitter_clear_rendertargets(struct wined3d_context_vk *context_vk
 
         if (view->layer_count > layer_count)
             layer_count = view->layer_count;
+        fb_width = min(fb_width, view->width);
+        fb_height = min(fb_height, view->height);
 
         ++attachment_count;
     }
@@ -1275,6 +1304,8 @@ static void vk_blitter_clear_rendertargets(struct wined3d_context_vk *context_vk
 
             if (view->layer_count > layer_count)
                 layer_count = view->layer_count;
+            fb_width = min(fb_width, view->width);
+            fb_height = min(fb_height, view->height);
 
             depth_stencil = true;
             ++attachment_count;
@@ -1320,8 +1351,11 @@ static void vk_blitter_clear_rendertargets(struct wined3d_context_vk *context_vk
     fb_desc.renderPass = vk_render_pass;
     fb_desc.attachmentCount = attachment_count;
     fb_desc.pAttachments = views;
-    fb_desc.width = draw_rect->right - draw_rect->left;
-    fb_desc.height = draw_rect->bottom - draw_rect->top;
+    /* The render area below is in attachment coordinates, so the framebuffer
+     * has to extend from the origin and must not be larger than any of its
+     * attachments. */
+    fb_desc.width = min(fb_width, (unsigned int)max(draw_rect->right, 1));
+    fb_desc.height = min(fb_height, (unsigned int)max(draw_rect->bottom, 1));
     fb_desc.layers = layer_count;
     if ((vr = VK_CALL(vkCreateFramebuffer(device_vk->vk_device, &fb_desc, NULL, &vk_framebuffer))) < 0)
     {
@@ -1344,6 +1378,10 @@ static void vk_blitter_clear_rendertargets(struct wined3d_context_vk *context_vk
         r.top = max(clear_rects[i].top, draw_rect->top);
         r.right = min(clear_rects[i].right, draw_rect->right);
         r.bottom = min(clear_rects[i].bottom, draw_rect->bottom);
+        r.left = max(r.left, 0);
+        r.top = max(r.top, 0);
+        r.right = min(r.right, (LONG)fb_desc.width);
+        r.bottom = min(r.bottom, (LONG)fb_desc.height);
 
         if (r.left >= r.right || r.top >= r.bottom)
             continue;
@@ -1365,6 +1403,29 @@ static void vk_blitter_clear_rendertargets(struct wined3d_context_vk *context_vk
     if (depth_stencil)
         wined3d_context_vk_reference_rendertarget_view(context_vk,
                 wined3d_rendertarget_view_vk(immediate_fb.depth_stencil));
+}
+
+/* Whether vk_blitter_clear_rendertargets() can clear the view. Views whose
+ * image has no colour attachment usage (e.g. block-compressed textures,
+ * whose formats can't be attachments at all) can't be cleared through a
+ * render pass. Full clears that don't depend on the view format can still be
+ * delayed and are then done with vkCmdClearColorImage(); anything else goes
+ * to the CPU. */
+static bool vk_blitter_can_clear_view(const struct wined3d_rendertarget_view *view,
+        const RECT *draw_rect, const RECT *clear_rect)
+{
+    struct wined3d_texture *texture;
+
+    if (view->resource->type == WINED3D_RTYPE_BUFFER)
+        return true;
+
+    texture = texture_from_resource(view->resource);
+    if (wined3d_texture_vk_has_color_attachment_usage(texture))
+        return true;
+
+    return wined3d_rendertarget_view_is_full_clear(view, draw_rect, clear_rect)
+            && !wined3d_format_is_typeless(texture->resource.format) && !texture->swapchain
+            && !(texture->resource.format_attrs & WINED3D_FORMAT_ATTR_PLANAR);
 }
 
 static void vk_blitter_clear(struct wined3d_blitter *blitter, struct wined3d_device *device,
@@ -1399,7 +1460,8 @@ static void vk_blitter_clear(struct wined3d_blitter *blitter, struct wined3d_dev
             if (!(view = fb->render_targets[i]))
                 continue;
 
-            if (wined3d_rendertarget_view_use_cpu_clear(view))
+            if (wined3d_rendertarget_view_use_cpu_clear(view)
+                    || !vk_blitter_can_clear_view(view, draw_rect, clear_rects))
             {
                 next_flags |= WINED3DCLEAR_TARGET;
                 flags &= ~WINED3DCLEAR_TARGET;
@@ -1504,12 +1566,38 @@ static bool vk_blitter_conversion_supported(enum wined3d_blit_op op, const struc
     return false;
 }
 
-static bool vk_blitter_blit_supported(enum wined3d_blit_op op, const struct wined3d_context *context,
-        const struct wined3d_resource *src_resource, const RECT *src_rect,
-        const struct wined3d_resource *dst_resource, const RECT *dst_rect, const struct wined3d_format *resolve_format)
+static bool use_raw_blit(enum wined3d_blit_op op, VkFormat src_format,
+        VkFormat dst_format, const RECT *src_rect, const RECT *dst_rect)
 {
+    if (op == WINED3D_BLIT_OP_RAW_BLIT)
+        return true;
+
+    return src_format == dst_format
+            && src_rect->right - src_rect->left == dst_rect->right - dst_rect->left
+            && src_rect->bottom - src_rect->top == dst_rect->bottom - dst_rect->top;
+}
+
+/* Linear filtering in vkCmdBlitImage() needs linear filtering support for the
+ * source format, which e.g. integer formats don't have. */
+static VkFilter vk_blit_filter(enum wined3d_texture_filter_type filter, VkFormatFeatureFlags src_features)
+{
+    VkFilter vk_filter = vk_filter_from_wined3d(filter);
+
+    if (vk_filter == VK_FILTER_LINEAR && !(src_features & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT))
+        return VK_FILTER_NEAREST;
+    return vk_filter;
+}
+
+static bool vk_blitter_blit_supported(enum wined3d_blit_op op, const struct wined3d_context *context,
+        const struct wined3d_texture *src_texture, unsigned int src_sub_resource_idx, const RECT *src_rect,
+        const struct wined3d_texture *dst_texture, unsigned int dst_sub_resource_idx, const RECT *dst_rect,
+        const struct wined3d_format *resolve_format)
+{
+    const struct wined3d_resource *src_resource = &src_texture->resource;
+    const struct wined3d_resource *dst_resource = &dst_texture->resource;
     const struct wined3d_format *src_format = src_resource->format;
     const struct wined3d_format *dst_format = dst_resource->format;
+    const struct wined3d_format_vk *blit_src_format_vk;
 
     if (!(dst_resource->access & WINED3D_RESOURCE_ACCESS_GPU))
     {
@@ -1557,27 +1645,39 @@ static bool vk_blitter_blit_supported(enum wined3d_blit_op op, const struct wine
         return false;
     }
 
-    if (op == WINED3D_BLIT_OP_RAW_BLIT)
-        return true;
-
-    if (op != WINED3D_BLIT_OP_COLOR_BLIT)
+    if (op != WINED3D_BLIT_OP_RAW_BLIT && op != WINED3D_BLIT_OP_COLOR_BLIT)
     {
         TRACE("Unsupported blit operation %#x.\n", op);
         return false;
     }
 
+    /* vkCmdCopyImage() and vkCmdBlitImage() need distinct source and
+     * destination regions, and the image can only be in one layout. */
+    if (src_texture == dst_texture && src_sub_resource_idx == dst_sub_resource_idx)
+    {
+        TRACE("Blits within one sub-resource are not supported.\n");
+        return false;
+    }
+
+    /* Copies other than raw ones go through vkCmdBlitImage(), from the
+     * resolved image for multisampled sources. That needs blit format
+     * features, which e.g. block-compressed destinations don't have. */
+    if (wined3d_resource_get_sample_count(src_resource) > 1 && resolve_format)
+        blit_src_format_vk = wined3d_format_vk(resolve_format);
+    else if (wined3d_resource_get_sample_count(src_resource) > 1 && wined3d_format_is_typeless(src_format))
+        blit_src_format_vk = wined3d_format_vk(dst_format);
+    else
+        blit_src_format_vk = wined3d_format_vk(src_format);
+    if (!use_raw_blit(op, blit_src_format_vk->vk_format, wined3d_format_vk(dst_format)->vk_format, src_rect, dst_rect)
+            && (!(blit_src_format_vk->vk_optimal_features & VK_FORMAT_FEATURE_BLIT_SRC_BIT)
+            || !(wined3d_format_vk(dst_format)->vk_optimal_features & VK_FORMAT_FEATURE_BLIT_DST_BIT)))
+    {
+        TRACE("Blit format features are not supported for %s -> %s.\n",
+                debug_d3dformat(src_format->id), debug_d3dformat(dst_format->id));
+        return false;
+    }
+
     return true;
-}
-
-static bool use_raw_blit(enum wined3d_blit_op op, VkFormat src_format,
-        VkFormat dst_format, const RECT *src_rect, const RECT *dst_rect)
-{
-    if (op == WINED3D_BLIT_OP_RAW_BLIT)
-        return true;
-
-    return src_format == dst_format
-            && src_rect->right - src_rect->left == dst_rect->right - dst_rect->left
-            && src_rect->bottom - src_rect->top == dst_rect->bottom - dst_rect->top;
 }
 
 static DWORD vk_blitter_blit(struct wined3d_blitter *blitter, enum wined3d_blit_op op,
@@ -1607,8 +1707,8 @@ static DWORD vk_blitter_blit(struct wined3d_blitter *blitter, enum wined3d_blit_
             wine_dbgstr_rect(src_rect), dst_texture, dst_sub_resource_idx, wined3d_debug_location(dst_location),
             wine_dbgstr_rect(dst_rect), colour_key, debug_d3dtexturefiltertype(filter), resolve_format);
 
-    if (!vk_blitter_blit_supported(op, context, &src_texture->resource, src_rect, &dst_texture->resource, dst_rect,
-            resolve_format))
+    if (!vk_blitter_blit_supported(op, context, src_texture, src_sub_resource_idx, src_rect,
+            dst_texture, dst_sub_resource_idx, dst_rect, resolve_format))
         goto next;
 
     src_sample_count = wined3d_resource_get_sample_count(&src_texture_vk->t.resource);
@@ -1688,20 +1788,24 @@ static DWORD vk_blitter_blit(struct wined3d_blitter *blitter, enum wined3d_blit_
         VkImageResolve resolve_region;
         VkImageType vk_image_type;
         VkImageCopy copy_region;
+        VkFormatFeatureFlags vk_features;
         VkFormat vk_format;
         bool raw;
 
         if (resolve_format)
         {
             vk_format = wined3d_format_vk(resolve_format)->vk_format;
+            vk_features = wined3d_format_vk(resolve_format)->vk_optimal_features;
         }
         else if (!wined3d_format_is_typeless(src_texture->resource.format))
         {
             vk_format = src_format_vk->vk_format;
+            vk_features = src_format_vk->vk_optimal_features;
         }
         else
         {
             vk_format = dst_format_vk->vk_format;
+            vk_features = dst_format_vk->vk_optimal_features;
         }
 
         switch (src_texture->resource.type)
@@ -1907,7 +2011,7 @@ static DWORD vk_blitter_blit(struct wined3d_blitter *blitter, enum wined3d_blit_
                 blit_region.dstOffsets[1].z = 1;
 
                 VK_CALL(vkCmdBlitImage(vk_command_buffer, dst_vk_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                        dst_texture_vk->image.vk_image, dst_layout, 1, &blit_region, vk_filter_from_wined3d(filter)));
+                        dst_texture_vk->image.vk_image, dst_layout, 1, &blit_region, vk_blit_filter(filter, vk_features)));
             }
         }
     }
@@ -1983,7 +2087,8 @@ static DWORD vk_blitter_blit(struct wined3d_blitter *blitter, enum wined3d_blit_
         region.dstOffsets[1].z = 1;
 
         VK_CALL(vkCmdBlitImage(vk_command_buffer, src_texture_vk->image.vk_image, src_layout,
-                dst_texture_vk->image.vk_image, dst_layout, 1, &region, vk_filter_from_wined3d(filter)));
+                dst_texture_vk->image.vk_image, dst_layout, 1, &region,
+                vk_blit_filter(filter, src_format_vk->vk_optimal_features)));
     }
 
     wined3d_context_vk_image_barrier(context_vk, vk_command_buffer,
