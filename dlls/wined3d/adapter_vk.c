@@ -620,6 +620,7 @@ static HRESULT adapter_vk_init_3d(struct wined3d_device *device)
 {
     struct wined3d_context_vk *context_vk;
     struct wined3d_device_vk *device_vk;
+    struct wined3d_shader *shader;
     HRESULT hr;
 
     TRACE("device %p.\n", device);
@@ -666,6 +667,13 @@ static HRESULT adapter_vk_init_3d(struct wined3d_device *device)
     if (device->adapter->d3d_info.feature_level >= WINED3D_FEATURE_LEVEL_11)
         wined3d_device_vk_uav_clear_state_init(device_vk);
 
+    /* adapter_vk_uninit_3d_cs() destroyed the backend data of the shaders
+     * that survive a device reset, as Direct3D 8 and 9 shaders do. */
+    LIST_FOR_EACH_ENTRY(shader, &device->shaders, struct wined3d_shader, shader_list_entry)
+    {
+        device->shader_backend->shader_precompile(device->shader_priv, shader);
+    }
+
     return WINED3D_OK;
 }
 
@@ -688,6 +696,8 @@ static void adapter_vk_uninit_3d_cs(void *object)
 
     if (device->adapter->d3d_info.feature_level >= WINED3D_FEATURE_LEVEL_11)
         wined3d_device_vk_uav_clear_state_cleanup(device_vk);
+    if (device_vk->present_resolve.image.vk_image)
+        wined3d_context_vk_destroy_image(context_vk, &device_vk->present_resolve.image);
     device->blitter->ops->blitter_destroy(device->blitter, NULL);
     device->shader_backend->shader_free_private(device, &context_vk->c);
     wined3d_device_vk_destroy_null_views(device_vk, context_vk);
