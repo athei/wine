@@ -1791,7 +1791,7 @@ static void *map_reserved_area( void *limit_low, void *limit_high, size_t size, 
         for (area = find_mem_area( end ); end > limit_low; end = mem_area_end( --area ))
         {
             if (mem_area_state( area ) != AREA_RESERVED) continue;
-            start = ROUND_ADDR( (char *)mem_area_base( area ) + align_mask, align_mask );
+            start = ROUND_ADDR( (char *)max( mem_area_base( area ), limit_low ) + align_mask, align_mask );
             if (start >= end || (char *)end - (char *)start < size) continue;
             ptr = ROUND_ADDR( (char *)end - size, align_mask );
             break;
@@ -5281,6 +5281,29 @@ static struct file_view *get_memory_region_size( char *base, char **region_start
         if (mem_area_end( area ) <= address_space_start) area++;
         *region_end = min( *region_end, (char *)mem_area_end( area ));
         *fake_reserved = TRUE;
+    }
+#else
+    {
+        unsigned int area = find_mem_area( base );
+
+        /* allocations fail in a blocked area, so report it as reserved */
+        if (mem_area_state( area ) == AREA_BLOCKED)
+        {
+            *region_start = max( *region_start, (char *)mem_area_base( area ));
+            *region_end   = min( *region_end, (char *)mem_area_end( area ));
+            *fake_reserved = TRUE;
+            return NULL;
+        }
+
+        /* and end a free region where a blocked area starts */
+        while ((char *)mem_area_end( area ) < *region_end)
+        {
+            if (mem_area_state( ++area ) == AREA_BLOCKED)
+            {
+                *region_end = mem_area_base( area );
+                break;
+            }
+        }
     }
 #endif
     return NULL;
