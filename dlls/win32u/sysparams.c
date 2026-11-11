@@ -2501,13 +2501,19 @@ static void set_winstation_monitors( BOOL increment )
     TRACE( "increment %u\n", increment );
     LIST_FOR_EACH_ENTRY( monitor, &monitors, struct monitor, entry )
     {
+        RECT virt = monitor_get_rect( monitor, no_dpi, MDT_EFFECTIVE_DPI ), raw;
+
         if (is_monitor_primary( monitor )) info->flags |= MONITOR_FLAG_PRIMARY;
         if (!is_monitor_active( monitor )) info->flags |= MONITOR_FLAG_INACTIVE;
         if (monitor->is_clone) info->flags |= MONITOR_FLAG_CLONE;
         info->dpi = monitor_get_dpi( monitor, MDT_EFFECTIVE_DPI, &x, &y );
         info->raw_dpi = monitor_get_dpi( monitor, MDT_RAW_DPI, &x, &y );
-        info->virt = wine_server_rectangle( monitor_get_rect( monitor, no_dpi, MDT_EFFECTIVE_DPI ) );
-        info->raw = wine_server_rectangle( monitor_get_rect( monitor, no_dpi, MDT_RAW_DPI ) );
+        info->virt = wine_server_rectangle( virt );
+        /* the server maps between raw and virtual coordinates by scaling one rect onto the
+         * other, so raw is where the current mode is shown, not the whole physical display */
+        if (info->flags & MONITOR_FLAG_INACTIVE) raw = monitor_get_rect( monitor, no_dpi, MDT_RAW_DPI );
+        else raw = map_monitor_rect( monitor, virt, no_dpi, MDT_EFFECTIVE_DPI, no_dpi, MDT_RAW_DPI );
+        info->raw = wine_server_rectangle( raw );
         TRACE( "  flags %#x virt %s dpi %s raw %s raw_dpi %s\n", info->flags, wine_dbgstr_rect( (RECT *)&info->virt ),
                debugstr_ratio( info->dpi ), wine_dbgstr_rect( (RECT *)&info->raw ), debugstr_ratio( info->raw_dpi ) );
         info++;
