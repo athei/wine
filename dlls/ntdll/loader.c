@@ -4536,7 +4536,19 @@ void loader_init( CONTEXT *context, void **entry )
     else
     {
 #ifdef _WIN64
-        if (NtCurrentTeb()->WowTebOffset) init_wow64( context );
+        if (NtCurrentTeb()->WowTebOffset)
+        {
+            /* the 32-bit context can't start code above 4 GB, such as the debugger's
+             * DbgUiRemoteBreakin; run such a thread on its 64-bit context. The rest of
+             * this function would run the first-time process attach, which the first
+             * thread of a wow64 process never reaches here */
+            if ((ULONG_PTR)*entry >> 32)
+            {
+                RtlLeaveCriticalSection( &loader_section );
+                return;
+            }
+            init_wow64( context );
+        }
 #endif
 #ifdef __arm64ec__
         arm64ec_thread_init();
