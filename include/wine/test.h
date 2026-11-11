@@ -569,6 +569,65 @@ static inline void winetest_add_failures( LONG new_failures )
     while (new_failures-- > 0) InterlockedIncrement( &winetest_failures );
 }
 
+/* Returns whether key is one of the items of the comma-separated list. */
+static inline int winetest_key_listed( const char *list, const char *key )
+{
+    size_t len = strlen( key );
+
+    for (;;)
+    {
+        const char *end = strchr( list, ',' );
+        size_t item_len = end ? (size_t)(end - list) : strlen( list );
+
+        if (item_len == len && !strncmp( list, key, len )) return 1;
+        if (!end) return 0;
+        list = end + 1;
+    }
+}
+
+/* Returns whether to run the test function with the given key, as selected
+ * by the environment:
+ * - WT_LIST: print "<pid>:wt-list:<key>" on every call and run nothing;
+ * - WT_ONLY: run only the keys of this comma-separated list;
+ * - WT_SKIP: run every key except those of this comma-separated list.
+ * WT_ONLY takes precedence over WT_SKIP. When one of them is set, every call
+ * for a selected key prints "<pid>:wt-run:<key>" and returns nonzero: for a
+ * helper that queues a test to run later, that is when the test is queued,
+ * not when it starts, and a function called several times prints the line
+ * once per call. Without any of them every key runs and nothing is printed.
+ *
+ * The variables are read on every call, since test files call this from
+ * their own code rather than through main().
+ */
+static inline int winetest_selected( const char *key )
+{
+    const char *list = getenv( "WT_LIST" );
+    const char *only = getenv( "WT_ONLY" );
+    const char *excluded = getenv( "WT_SKIP" );
+
+    if (list && *list)
+    {
+        winetest_print_lock();
+        winetest_printf( "%04x:wt-list:%s\n", (UINT)GetCurrentProcessId(), key );
+        winetest_print_unlock();
+        return 0;
+    }
+    if (only && *only)
+    {
+        if (!winetest_key_listed( only, key )) return 0;
+    }
+    else if (excluded && *excluded)
+    {
+        if (winetest_key_listed( excluded, key )) return 0;
+    }
+    else return 1;
+
+    winetest_print_lock();
+    winetest_printf( "%04x:wt-run:%s\n", (UINT)GetCurrentProcessId(), key );
+    winetest_print_unlock();
+    return 1;
+}
+
 
 /************************************************************************/
 /* Below is the implementation of the various functions, to be included
