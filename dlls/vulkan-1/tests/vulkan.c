@@ -1829,6 +1829,15 @@ static void for_each_device(void (*test_func)(VkPhysicalDevice))
     for_each_device_instance(0, NULL, NULL, test_func);
 }
 
+/* Test selection through WT_LIST, WT_ONLY and WT_SKIP, generated: do not edit. */
+#define for_each_device(f) do { if (winetest_selected(#f)) for_each_device(f); } while (0)
+#define for_each_device_instance(a1, a2, f, a4) do { if (winetest_selected(#f)) for_each_device_instance(a1, a2, f, a4); } while (0)
+#define test_instance_version(...) do { if (winetest_selected("test_instance_version")) test_instance_version(__VA_ARGS__); } while (0)
+#define test_enumerate_physical_device2(...) do { if (winetest_selected("test_enumerate_physical_device2")) test_enumerate_physical_device2(__VA_ARGS__); } while (0)
+#define test_physical_device_groups(...) do { if (winetest_selected("test_physical_device_groups")) test_physical_device_groups(__VA_ARGS__); } while (0)
+#define test_unsupported_instance_extensions(...) do { if (winetest_selected("test_unsupported_instance_extensions")) test_unsupported_instance_extensions(__VA_ARGS__); } while (0)
+/* End of the generated test selection. */
+
 START_TEST(vulkan)
 {
     char **argv;

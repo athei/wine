@@ -301,6 +301,12 @@ float4 main(float4 pos : POSITION) : POSITION
     ID3D10Device_Release(device);
 }
 
+/* Test selection through WT_LIST, WT_ONLY and WT_SKIP, generated: do not edit. */
+#define test_create_device(...) do { if (winetest_selected("test_create_device")) test_create_device(__VA_ARGS__); } while (0)
+#define test_stateblock_mask(...) do { if (winetest_selected("test_stateblock_mask")) test_stateblock_mask(__VA_ARGS__); } while (0)
+#define test_stateblock(...) do { if (winetest_selected("test_stateblock")) test_stateblock(__VA_ARGS__); } while (0)
+/* End of the generated test selection. */
+
 START_TEST(device)
 {
     test_create_device();

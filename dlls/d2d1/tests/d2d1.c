@@ -18300,6 +18300,11 @@ static void test_sprite_batch(BOOL d3d11)
     release_test_context(&ctx);
 }
 
+/* Test selection through WT_LIST, WT_ONLY and WT_SKIP, generated: do not edit. */
+#define queue_test(f) do { if (winetest_selected(#f)) queue_test(f); } while (0)
+#define queue_d3d10_test(f) do { if (winetest_selected(#f)) queue_d3d10_test(f); } while (0)
+/* End of the generated test selection. */
+
 START_TEST(d2d1)
 {
     HMODULE d2d1_dll = GetModuleHandleA("d2d1.dll");
