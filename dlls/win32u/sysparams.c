@@ -303,26 +303,48 @@ static pthread_mutex_t display_dc_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t user_mutex;
 static unsigned int user_lock_thread, user_lock_rec;
 
-static UINT gcd( UINT a, UINT b )
+static UINT64 ratio_error( UINT num, UINT den, UINT p, UINT q )
 {
-    UINT r;
-
-    for (;;)
-    {
-        if (!a) return b;
-        if (!b) return a;
-        r = a % b;
-        a = b;
-        b = r;
-    }
+    INT64 diff = (INT64)p * den - (INT64)num * q;
+    return diff < 0 ? -diff : diff;
 }
 
+/* the closest fraction to num / den with both terms below 65536 */
 static struct ratio make_ratio( UINT num, UINT den )
 {
-    UINT d = gcd( num, den );
-    struct ratio r = { num / d, den / d };
-    assert( num / d < 65536 );
-    assert( den / d < 65536 );
+    UINT n = num, m = den, p0 = 0, q0 = 1, p1 = 1, q1 = 0, a, k, t;
+    struct ratio r;
+
+    /* the convergents of num / den, the last of which is num / den in lowest terms */
+    while (m)
+    {
+        a = k = n / m;
+        if (p1) k = min( k, (0xffff - p0) / p1 );
+        if (q1) k = min( k, (0xffff - q0) / q1 );
+        if (k < a)
+        {
+            /* the next convergent does not fit, the closest semiconvergent may */
+            UINT p = p0 + k * p1, q = q0 + k * q1;
+            if (!q1 || ratio_error( num, den, p, q ) * q1 < ratio_error( num, den, p1, q1 ) * q)
+            {
+                p1 = p;
+                q1 = q;
+            }
+            break;
+        }
+        t = p0 + a * p1;
+        p0 = p1;
+        p1 = t;
+        t = q0 + a * q1;
+        q0 = q1;
+        q1 = t;
+        t = n % m;
+        n = m;
+        m = t;
+    }
+
+    r.num = p1;
+    r.den = q1;
     return r;
 }
 
