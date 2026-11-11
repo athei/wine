@@ -6098,6 +6098,42 @@ static void test_other_process_parent( HDC hdc )
     flush_events();
 }
 
+/* Test selection through WT_LIST, WT_ONLY and WT_SKIP, generated: do not edit. */
+#define test_bitmap_rendering(...) do { if (winetest_selected("test_bitmap_rendering")) test_bitmap_rendering(__VA_ARGS__); } while (0)
+#define test_16bit_bitmap_rendering(...) do { if (winetest_selected("test_16bit_bitmap_rendering")) test_16bit_bitmap_rendering(__VA_ARGS__); } while (0)
+#define test_d3dkmt_rendering(...) do { if (winetest_selected("test_d3dkmt_rendering")) test_d3dkmt_rendering(__VA_ARGS__); } while (0)
+#define test_minimized(...) do { if (winetest_selected("test_minimized")) test_minimized(__VA_ARGS__); } while (0)
+#define test_window_dc(...) do { if (winetest_selected("test_window_dc")) test_window_dc(__VA_ARGS__); } while (0)
+#define test_message_window(...) do { if (winetest_selected("test_message_window")) test_message_window(__VA_ARGS__); } while (0)
+#define test_dc(...) do { if (winetest_selected("test_dc")) test_dc(__VA_ARGS__); } while (0)
+#define test_getprocaddress(...) do { if (winetest_selected("test_getprocaddress")) test_getprocaddress(__VA_ARGS__); } while (0)
+#define test_deletecontext(...) do { if (winetest_selected("test_deletecontext")) test_deletecontext(__VA_ARGS__); } while (0)
+#define test_makecurrent(...) do { if (winetest_selected("test_makecurrent")) test_makecurrent(__VA_ARGS__); } while (0)
+#define test_copy_context(...) do { if (winetest_selected("test_copy_context")) test_copy_context(__VA_ARGS__); } while (0)
+#define test_choosepixelformat(...) do { if (winetest_selected("test_choosepixelformat")) test_choosepixelformat(__VA_ARGS__); } while (0)
+#define test_choosepixelformat_flag_is_ignored_when_unset(...) do { if (winetest_selected("test_choosepixelformat_flag_is_ignored_when_unset")) test_choosepixelformat_flag_is_ignored_when_unset(__VA_ARGS__); } while (0)
+#define test_wglChoosePixelFormatARB(...) do { if (winetest_selected("test_wglChoosePixelFormatARB")) test_wglChoosePixelFormatARB(__VA_ARGS__); } while (0)
+#define test_debug_message_callback(...) do { if (winetest_selected("test_debug_message_callback")) test_debug_message_callback(__VA_ARGS__); } while (0)
+#define test_setpixelformat(...) do { if (winetest_selected("test_setpixelformat")) test_setpixelformat(__VA_ARGS__); } while (0)
+#define test_destroy(...) do { if (winetest_selected("test_destroy")) test_destroy(__VA_ARGS__); } while (0)
+#define test_sharelists(...) do { if (winetest_selected("test_sharelists")) test_sharelists(__VA_ARGS__); } while (0)
+#define test_colorbits(...) do { if (winetest_selected("test_colorbits")) test_colorbits(__VA_ARGS__); } while (0)
+#define test_gdi_dbuf(...) do { if (winetest_selected("test_gdi_dbuf")) test_gdi_dbuf(__VA_ARGS__); } while (0)
+#define test_acceleration(...) do { if (winetest_selected("test_acceleration")) test_acceleration(__VA_ARGS__); } while (0)
+#define test_framebuffer(...) do { if (winetest_selected("test_framebuffer")) test_framebuffer(__VA_ARGS__); } while (0)
+#define test_memory_map(...) do { if (winetest_selected("test_memory_map")) test_memory_map(__VA_ARGS__); } while (0)
+#define test_gl_error(...) do { if (winetest_selected("test_gl_error")) test_gl_error(__VA_ARGS__); } while (0)
+#define test_other_process_window(...) do { if (winetest_selected("test_other_process_window")) test_other_process_window(__VA_ARGS__); } while (0)
+#define test_other_process_parent(...) do { if (winetest_selected("test_other_process_parent")) test_other_process_parent(__VA_ARGS__); } while (0)
+#define test_wglCreateContextAttribsARB(...) do { if (winetest_selected("test_wglCreateContextAttribsARB")) test_wglCreateContextAttribsARB(__VA_ARGS__); } while (0)
+#define test_object_creation(...) do { if (winetest_selected("test_object_creation")) test_object_creation(__VA_ARGS__); } while (0)
+#define test_make_current_read(...) do { if (winetest_selected("test_make_current_read")) test_make_current_read(__VA_ARGS__); } while (0)
+#define test_destroy_read(...) do { if (winetest_selected("test_destroy_read")) test_destroy_read(__VA_ARGS__); } while (0)
+#define test_pbuffers(...) do { if (winetest_selected("test_pbuffers")) test_pbuffers(__VA_ARGS__); } while (0)
+#define test_swap_control(...) do { if (winetest_selected("test_swap_control")) test_swap_control(__VA_ARGS__); } while (0)
+#define test_child_window(...) do { if (winetest_selected("test_child_window")) test_child_window(__VA_ARGS__); } while (0)
+/* End of the generated test selection. */
+
 START_TEST(opengl)
 {
     const PIXELFORMATDESCRIPTOR pfd =

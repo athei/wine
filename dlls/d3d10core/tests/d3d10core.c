@@ -19752,6 +19752,13 @@ static void test_clear_after_draw(void)
     release_test_context(&test_context);
 }
 
+/* Test selection through WT_LIST, WT_ONLY and WT_SKIP, generated: do not edit. */
+#define queue_test(f) do { if (winetest_selected(#f)) queue_test(f); } while (0)
+#define test_stream_output_vs(...) do { if (winetest_selected("test_stream_output_vs")) test_stream_output_vs(__VA_ARGS__); } while (0)
+#define test_instanced_draw(...) do { if (winetest_selected("test_instanced_draw")) test_instanced_draw(__VA_ARGS__); } while (0)
+#define test_generate_mips(...) do { if (winetest_selected("test_generate_mips")) test_generate_mips(__VA_ARGS__); } while (0)
+/* End of the generated test selection. */
+
 START_TEST(d3d10core)
 {
     unsigned int argc, i;

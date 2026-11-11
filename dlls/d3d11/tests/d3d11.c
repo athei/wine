@@ -37808,6 +37808,15 @@ static void test_video_support(void)
     IDXGIFactory_Release(factory);
 }
 
+/* Test selection through WT_LIST, WT_ONLY and WT_SKIP, generated: do not edit. */
+#define queue_test(f) do { if (winetest_selected(#f)) queue_test(f); } while (0)
+#define queue_for_each_feature_level(f) do { if (winetest_selected(#f)) queue_for_each_feature_level(f); } while (0)
+#define queue_for_each_9_x_feature_level(f) do { if (winetest_selected(#f)) queue_for_each_9_x_feature_level(f); } while (0)
+#define queue_for_each_feature_level_in_range(a1, a2, f) do { if (winetest_selected(#f)) queue_for_each_feature_level_in_range(a1, a2, f); } while (0)
+#define test_instanced_draw(...) do { if (winetest_selected("test_instanced_draw")) test_instanced_draw(__VA_ARGS__); } while (0)
+#define test_generate_mips(...) do { if (winetest_selected("test_generate_mips")) test_generate_mips(__VA_ARGS__); } while (0)
+/* End of the generated test selection. */
+
 START_TEST(d3d11)
 {
     unsigned int argc, i;

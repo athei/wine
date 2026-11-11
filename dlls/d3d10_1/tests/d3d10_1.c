@@ -1075,6 +1075,17 @@ static void test_compile_effect(void)
     ok(hr == E_FAIL, "Unexpected hr %#lx.\n", hr);
 }
 
+/* Test selection through WT_LIST, WT_ONLY and WT_SKIP, generated: do not edit. */
+#define test_create_device(...) do { if (winetest_selected("test_create_device")) test_create_device(__VA_ARGS__); } while (0)
+#define test_device_interfaces(...) do { if (winetest_selected("test_device_interfaces")) test_device_interfaces(__VA_ARGS__); } while (0)
+#define test_create_shader_resource_view(...) do { if (winetest_selected("test_create_shader_resource_view")) test_create_shader_resource_view(__VA_ARGS__); } while (0)
+#define test_create_blend_state(...) do { if (winetest_selected("test_create_blend_state")) test_create_blend_state(__VA_ARGS__); } while (0)
+#define test_getdc(...) do { if (winetest_selected("test_getdc")) test_getdc(__VA_ARGS__); } while (0)
+#define test_fx_4_1_blend_state(...) do { if (winetest_selected("test_fx_4_1_blend_state")) test_fx_4_1_blend_state(__VA_ARGS__); } while (0)
+#define test_shader_profiles(...) do { if (winetest_selected("test_shader_profiles")) test_shader_profiles(__VA_ARGS__); } while (0)
+#define test_compile_effect(...) do { if (winetest_selected("test_compile_effect")) test_compile_effect(__VA_ARGS__); } while (0)
+/* End of the generated test selection. */
+
 START_TEST(d3d10_1)
 {
     test_create_device();

@@ -9721,6 +9721,36 @@ static void test_effect_compiler(void)
     ID3D10Device_Release(device);
 }
 
+/* Test selection through WT_LIST, WT_ONLY and WT_SKIP, generated: do not edit. */
+#define test_effect_constant_buffer_type(...) do { if (winetest_selected("test_effect_constant_buffer_type")) test_effect_constant_buffer_type(__VA_ARGS__); } while (0)
+#define test_effect_variable_type(...) do { if (winetest_selected("test_effect_variable_type")) test_effect_variable_type(__VA_ARGS__); } while (0)
+#define test_effect_variable_member(...) do { if (winetest_selected("test_effect_variable_member")) test_effect_variable_member(__VA_ARGS__); } while (0)
+#define test_effect_variable_element(...) do { if (winetest_selected("test_effect_variable_element")) test_effect_variable_element(__VA_ARGS__); } while (0)
+#define test_effect_variable_type_class(...) do { if (winetest_selected("test_effect_variable_type_class")) test_effect_variable_type_class(__VA_ARGS__); } while (0)
+#define test_effect_constant_buffer_stride(...) do { if (winetest_selected("test_effect_constant_buffer_stride")) test_effect_constant_buffer_stride(__VA_ARGS__); } while (0)
+#define test_effect_local_shader(...) do { if (winetest_selected("test_effect_local_shader")) test_effect_local_shader(__VA_ARGS__); } while (0)
+#define test_effect_get_variable_by(...) do { if (winetest_selected("test_effect_get_variable_by")) test_effect_get_variable_by(__VA_ARGS__); } while (0)
+#define test_effect_state_groups(...) do { if (winetest_selected("test_effect_state_groups")) test_effect_state_groups(__VA_ARGS__); } while (0)
+#define test_effect_state_group_defaults(...) do { if (winetest_selected("test_effect_state_group_defaults")) test_effect_state_group_defaults(__VA_ARGS__); } while (0)
+#define test_effect_scalar_variable(...) do { if (winetest_selected("test_effect_scalar_variable")) test_effect_scalar_variable(__VA_ARGS__); } while (0)
+#define test_effect_vector_variable(...) do { if (winetest_selected("test_effect_vector_variable")) test_effect_vector_variable(__VA_ARGS__); } while (0)
+#define test_effect_matrix_variable(...) do { if (winetest_selected("test_effect_matrix_variable")) test_effect_matrix_variable(__VA_ARGS__); } while (0)
+#define test_effect_resource_variable(...) do { if (winetest_selected("test_effect_resource_variable")) test_effect_resource_variable(__VA_ARGS__); } while (0)
+#define test_effect_annotations(...) do { if (winetest_selected("test_effect_annotations")) test_effect_annotations(__VA_ARGS__); } while (0)
+#define test_effect_optimize(...) do { if (winetest_selected("test_effect_optimize")) test_effect_optimize(__VA_ARGS__); } while (0)
+#define test_effect_shader_description(...) do { if (winetest_selected("test_effect_shader_description")) test_effect_shader_description(__VA_ARGS__); } while (0)
+#define test_effect_shader_object(...) do { if (winetest_selected("test_effect_shader_object")) test_effect_shader_object(__VA_ARGS__); } while (0)
+#define test_effect_pool(...) do { if (winetest_selected("test_effect_pool")) test_effect_pool(__VA_ARGS__); } while (0)
+#define test_effect_default_variable_value(...) do { if (winetest_selected("test_effect_default_variable_value")) test_effect_default_variable_value(__VA_ARGS__); } while (0)
+#define test_effect_raw_value(...) do { if (winetest_selected("test_effect_raw_value")) test_effect_raw_value(__VA_ARGS__); } while (0)
+#define test_effect_dynamic_numeric_field(...) do { if (winetest_selected("test_effect_dynamic_numeric_field")) test_effect_dynamic_numeric_field(__VA_ARGS__); } while (0)
+#define test_effect_index_expression(...) do { if (winetest_selected("test_effect_index_expression")) test_effect_index_expression(__VA_ARGS__); } while (0)
+#define test_effect_value_expression(...) do { if (winetest_selected("test_effect_value_expression")) test_effect_value_expression(__VA_ARGS__); } while (0)
+#define test_effect_fx_4_1(...) do { if (winetest_selected("test_effect_fx_4_1")) test_effect_fx_4_1(__VA_ARGS__); } while (0)
+#define test_effect_fx_4_1_blend_state(...) do { if (winetest_selected("test_effect_fx_4_1_blend_state")) test_effect_fx_4_1_blend_state(__VA_ARGS__); } while (0)
+#define test_effect_compiler(...) do { if (winetest_selected("test_effect_compiler")) test_effect_compiler(__VA_ARGS__); } while (0)
+/* End of the generated test selection. */
+
 START_TEST(effect)
 {
     test_effect_constant_buffer_type();

@@ -9028,6 +9028,17 @@ static void test_subresource_surface(void)
     ok(!refcount, "Device has %lu references left.\n", refcount);
 }
 
+/* Test selection through WT_LIST, WT_ONLY and WT_SKIP, generated: do not edit. */
+#define queue_test(f) do { if (winetest_selected(#f)) queue_test(f); } while (0)
+#define run_on_d3d10(f) do { if (winetest_selected("d3d10:" #f)) run_on_d3d10(f); } while (0)
+#define run_on_d3d12(f) do { if (winetest_selected("d3d12:" #f)) run_on_d3d12(f); } while (0)
+#define test_inexact_modes(...) do { if (winetest_selected("test_inexact_modes")) test_inexact_modes(__VA_ARGS__); } while (0)
+#define test_gamma_control(...) do { if (winetest_selected("test_gamma_control")) test_gamma_control(__VA_ARGS__); } while (0)
+#define test_multi_adapter(...) do { if (winetest_selected("test_multi_adapter")) test_multi_adapter(__VA_ARGS__); } while (0)
+#define test_swapchain_parameters(...) do { if (winetest_selected("test_swapchain_parameters")) test_swapchain_parameters(__VA_ARGS__); } while (0)
+#define test_swapchain_window_styles(...) do { if (winetest_selected("test_swapchain_window_styles")) test_swapchain_window_styles(__VA_ARGS__); } while (0)
+/* End of the generated test selection. */
+
 START_TEST(dxgi)
 {
     HMODULE dxgi_module, d3d11_module, d3d12_module, gdi32_module;
