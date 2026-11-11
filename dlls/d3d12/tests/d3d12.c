@@ -1545,6 +1545,19 @@ static void test_invalid_command_queue_types(void)
     ok(!refcount, "Device has %lu references left.\n", refcount);
 }
 
+/* Test selection through WT_LIST, WT_ONLY and WT_SKIP, generated: do not edit. */
+#define test_ordinals(...) do { if (winetest_selected("test_ordinals")) test_ordinals(__VA_ARGS__); } while (0)
+#define test_interfaces(...) do { if (winetest_selected("test_interfaces")) test_interfaces(__VA_ARGS__); } while (0)
+#define test_create_device(...) do { if (winetest_selected("test_create_device")) test_create_device(__VA_ARGS__); } while (0)
+#define test_draw(...) do { if (winetest_selected("test_draw")) test_draw(__VA_ARGS__); } while (0)
+#define test_swapchain_draw(...) do { if (winetest_selected("test_swapchain_draw")) test_swapchain_draw(__VA_ARGS__); } while (0)
+#define test_swapchain_refcount(...) do { if (winetest_selected("test_swapchain_refcount")) test_swapchain_refcount(__VA_ARGS__); } while (0)
+#define test_swapchain_size_mismatch(...) do { if (winetest_selected("test_swapchain_size_mismatch")) test_swapchain_size_mismatch(__VA_ARGS__); } while (0)
+#define test_swapchain_backbuffer_index(...) do { if (winetest_selected("test_swapchain_backbuffer_index")) test_swapchain_backbuffer_index(__VA_ARGS__); } while (0)
+#define test_desktop_window(...) do { if (winetest_selected("test_desktop_window")) test_desktop_window(__VA_ARGS__); } while (0)
+#define test_invalid_command_queue_types(...) do { if (winetest_selected("test_invalid_command_queue_types")) test_invalid_command_queue_types(__VA_ARGS__); } while (0)
+/* End of the generated test selection. */
+
 START_TEST(d3d12)
 {
     BOOL enable_debug_layer = FALSE;

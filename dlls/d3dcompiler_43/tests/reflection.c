@@ -2248,6 +2248,18 @@ static const D3D12_SHADER_INPUT_BIND_DESC test_reflection_bound_resources_sm51_r
     {"c2", D3D_SIT_CBUFFER, 0, 1, D3D_SIF_USERPACKED, 0, D3D_SRV_DIMENSION_UNKNOWN, 0, 1, 1},
 };
 
+/* Test selection through WT_LIST, WT_ONLY and WT_SKIP, generated: do not edit. */
+#define test_reflection_references(...) do { if (winetest_selected("test_reflection_references")) test_reflection_references(__VA_ARGS__); } while (0)
+#define test_reflection_interfaces(...) do { if (winetest_selected("test_reflection_interfaces")) test_reflection_interfaces(__VA_ARGS__); } while (0)
+#define test_d3d10_interfaces(...) do { if (winetest_selected("test_d3d10_interfaces")) test_d3d10_interfaces(__VA_ARGS__); } while (0)
+#define test_reflection_cs(...) do { if (winetest_selected("test_reflection_cs")) test_reflection_cs(__VA_ARGS__); } while (0)
+#define test_reflection_desc_vs(...) do { if (winetest_selected("test_reflection_desc_vs")) test_reflection_desc_vs(__VA_ARGS__); } while (0)
+#define test_reflection_desc_ps(...) do { if (winetest_selected("test_reflection_desc_ps")) test_reflection_desc_ps(__VA_ARGS__); } while (0)
+#define test_reflection_desc_ps_output(...) do { if (winetest_selected("test_reflection_desc_ps_output")) test_reflection_desc_ps_output(__VA_ARGS__); } while (0)
+#define test_reflection_bound_resources(...) do { if (winetest_selected("test_reflection_bound_resources")) test_reflection_bound_resources(__VA_ARGS__); } while (0)
+#define test_reflection_constant_buffer(...) do { if (winetest_selected("test_reflection_constant_buffer")) test_reflection_constant_buffer(__VA_ARGS__); } while (0)
+/* End of the generated test selection. */
+
 START_TEST(reflection)
 {
 #if D3D_COMPILER_VERSION
