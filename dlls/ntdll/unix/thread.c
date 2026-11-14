@@ -1421,6 +1421,12 @@ NTSTATUS WINAPI NtCreateThreadEx( HANDLE *handle, ACCESS_MASK access, OBJECT_ATT
         call.create_thread.zero_bits = zero_bits;
         call.create_thread.reserve   = stack_reserve;
         call.create_thread.commit    = stack_commit;
+#ifdef __aarch64__
+        /* the ARM64 and ARM64EC halves of ntdll each have a DbgUiRemoteBreakin, and a
+         * process can only run the one of its own half; ask the target for its own,
+         * see invoke_system_apc() */
+        if (start == pDbgUiRemoteBreakin) call.create_thread.func = 0x7ffe1000;
+#endif
         status = server_queue_process_apc( process, &call, &result );
         if (status != STATUS_SUCCESS) return status;
 
