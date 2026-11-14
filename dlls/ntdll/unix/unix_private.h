@@ -128,6 +128,7 @@ struct thread_data
     void        *param;             /* thread entry point parameter */
     struct list  entry;             /* entry in TEB list */
     ULONG_PTR    breakpoint_pc;     /* instruction pointer of an x64 breakpoint backed up for the handlers */
+    BOOL         fd_cache_locked;   /* the thread holds fd_cache_mutex */
     const struct msync_wait *msync_wait; /* wait the thread has registered with the msync server */
     char         debug_info[0x800]; /* debug_info structure */
     char         signal_stack[];    /* signal stack */
@@ -327,6 +328,7 @@ extern void virtual_recheck_large_address_space(void);
 extern NTSTATUS virtual_alloc_teb( struct thread_data *data );
 struct thread_data *virtual_alloc_thread_data(void);
 extern void virtual_free_thread_data( struct thread_data *data );
+extern void virtual_abort_thread(void);
 extern NTSTATUS virtual_clear_tls_index( ULONG index );
 extern NTSTATUS virtual_alloc_thread_stack( INITIAL_TEB *stack, ULONG_PTR limit_low, ULONG_PTR limit_high,
                                             SIZE_T reserve_size, SIZE_T commit_size, BOOL guard_page );

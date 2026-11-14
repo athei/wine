@@ -328,6 +328,8 @@ void server_enter_uninterrupted_section( pthread_mutex_t *mutex, sigset_t *sigse
 {
     pthread_sigmask( SIG_BLOCK, &server_block_set, sigset );
     mutex_lock( mutex );
+    /* for abort_thread() */
+    if (mutex == &fd_cache_mutex) get_thread_data()->fd_cache_locked = TRUE;
 }
 
 
@@ -336,6 +338,7 @@ void server_enter_uninterrupted_section( pthread_mutex_t *mutex, sigset_t *sigse
  */
 void server_leave_uninterrupted_section( pthread_mutex_t *mutex, sigset_t *sigset )
 {
+    if (mutex == &fd_cache_mutex) get_thread_data()->fd_cache_locked = FALSE;
     mutex_unlock( mutex );
     pthread_sigmask( SIG_SETMASK, sigset, NULL );
 }
