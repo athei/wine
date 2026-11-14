@@ -4117,6 +4117,19 @@ struct thread_data *virtual_alloc_thread_data(void)
 
 
 /***********************************************************************
+ *           virtual_abort_thread
+ *
+ * Called by abort_thread() for a thread that is killed, to release
+ * virtual_mutex if the thread holds it.
+ */
+void virtual_abort_thread(void)
+{
+    /* the mutex is recursive, so unlocking it fails once this thread holds it no more */
+    while (!pthread_mutex_unlock( &virtual_mutex ));
+}
+
+
+/***********************************************************************
  *           virtual_free_thread_data
  */
 void virtual_free_thread_data( struct thread_data *data )

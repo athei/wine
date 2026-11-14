@@ -1504,10 +1504,24 @@ NTSTATUS WINAPI PsCreateSystemThread( HANDLE *handle, ACCESS_MASK access, OBJECT
  */
 void abort_thread( int status )
 {
+    struct thread_data *data = get_thread_data();
+
     pthread_sigmask( SIG_BLOCK, &server_block_set, NULL );
     /* also for the last thread: other processes may share the objects */
-    msync_abort_thread( get_thread_data() );
+    msync_abort_thread( data );
     if (InterlockedDecrement( &nb_threads ) <= 0) abort_process( status );
+    /* An uninterrupted section blocks the signal that kills the thread, but
+     * the server also closes the pipes of a thread it kills, without waiting
+     * for a request in flight, and the server call of the section then ends
+     * here. Each section of fd_cache_mutex leaves the caches consistent
+     * before it calls the server, and each of virtual_mutex the views. That
+     * end has status 0; status 1 is a crash of the unix side, which may
+     * have been anywhere in a section, so both mutexes stay held then. */
+    if (!status)
+    {
+        if (data->fd_cache_locked) mutex_unlock( &fd_cache_mutex );
+        virtual_abort_thread();
+    }
     pthread_exit_wrapper( status );
 }
 
