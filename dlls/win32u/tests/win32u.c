@@ -1132,6 +1132,43 @@ static void test_NtUserBuildHwndList(void)
     DestroyWindow( msg );
 }
 
+static LRESULT WINAPI ncdestroy_list_proc( HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam )
+{
+    if (msg == WM_NCDESTROY)
+    {
+        HWND buf[16];
+        NTSTATUS status;
+        ULONG size = 0xdeadbeef;
+
+        status = NtUserBuildHwndList( 0, hwnd, FALSE, FALSE, 0, ARRAYSIZE(buf), buf, &size );
+        ok( !status, "NtUserBuildHwndList failed: %#lx\n", status );
+        ok( size == 2, "size = %lu\n", size );
+        ok( buf[0] == hwnd, "buf[0] = %p / %p\n", buf[0], hwnd );
+        ok( buf[size - 1] == HWND_BOTTOM, "buf[size - 1] = %p\n", buf[size - 1] );
+    }
+    return DefWindowProcA( hwnd, msg, wparam, lparam );
+}
+
+static void test_NtUserBuildHwndList_ncdestroy(void)
+{
+    WNDCLASSA cls = { 0 };
+    HWND hwnd, child;
+
+    cls.lpfnWndProc = ncdestroy_list_proc;
+    cls.hInstance = GetModuleHandleA( NULL );
+    cls.lpszClassName = "ncdestroy_list_class";
+    ok( RegisterClassA( &cls ), "RegisterClassA failed: %lu\n", GetLastError() );
+
+    hwnd = CreateWindowExA( 0, "static", "test static", WS_POPUP, 0,0,0,0,GetDesktopWindow(),0,0, NULL );
+    child = CreateWindowExA( 0, "ncdestroy_list_class", "child", WS_CHILD, 0,0,0,0,hwnd,0,0, NULL );
+    ok( child != 0, "CreateWindowExA failed: %lu\n", GetLastError() );
+
+    /* Wine unlinks the child from the parent's z-order before it sends WM_NCDESTROY */
+    DestroyWindow( child );
+    DestroyWindow( hwnd );
+    UnregisterClassA( "ncdestroy_list_class", cls.hInstance );
+}
+
 static BOOL CALLBACK enum_names( LPWSTR name, LPARAM lp )
 {
     struct ntuser_name_list *buffer = (struct ntuser_name_list *)lp;
@@ -3097,6 +3134,7 @@ START_TEST(win32u)
     test_NtUserCreateInputContext();
     test_NtUserBuildHimcList();
     test_NtUserBuildHwndList();
+    test_NtUserBuildHwndList_ncdestroy();
     test_NtUserBuildNameList();
     test_cursoricon();
     test_message_call();

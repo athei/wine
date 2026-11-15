@@ -191,14 +191,20 @@ static int is_orphan_window( struct window *win )
 /* get next window in Z-order list */
 static inline struct window *get_next_window( struct window *win )
 {
-    struct list *ptr = list_next( &win->parent->children, &win->entry );
+    struct list *ptr;
+
+    if (!win->is_linked) return NULL;
+    ptr = list_next( &win->parent->children, &win->entry );
     return ptr ? LIST_ENTRY( ptr, struct window, entry ) : NULL;
 }
 
 /* get previous window in Z-order list */
 static inline struct window *get_prev_window( struct window *win )
 {
-    struct list *ptr = list_prev( &win->parent->children, &win->entry );
+    struct list *ptr;
+
+    if (!win->is_linked) return NULL;
+    ptr = list_prev( &win->parent->children, &win->entry );
     return ptr ? LIST_ENTRY( ptr, struct window, entry ) : NULL;
 }
 
@@ -337,6 +343,7 @@ static int link_window( struct window *win, struct window *previous )
 
     old_prev = win->is_linked ? win->entry.prev : NULL;
     list_remove( &win->entry );  /* unlink it from the previous location */
+    win->is_linked = 1;
 
     if (previous == WINPTR_BOTTOM)
     {
@@ -378,7 +385,6 @@ static int link_window( struct window *win, struct window *previous )
         }
     }
 
-    win->is_linked = 1;
     return old_prev != win->entry.prev;
 }
 

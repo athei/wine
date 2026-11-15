@@ -10297,6 +10297,40 @@ static void test_FindWindowEx(void)
     ok( found != NULL, "found is NULL, expected a valid hwnd\n" );
 }
 
+static HWND ncdestroy_parent;
+
+static LRESULT WINAPI ncdestroy_sibling_proc( HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam )
+{
+    if (msg == WM_NCDESTROY)
+    {
+        HWND found = FindWindowExA( ncdestroy_parent, hwnd, NULL, NULL );
+        ok( !found, "got sibling %p\n", found );
+    }
+    return DefWindowProcA( hwnd, msg, wparam, lparam );
+}
+
+static void test_FindWindowEx_ncdestroy(void)
+{
+    WNDCLASSA cls = { 0 };
+    HWND child;
+
+    cls.lpfnWndProc = ncdestroy_sibling_proc;
+    cls.hInstance = GetModuleHandleA( NULL );
+    cls.lpszClassName = "ncdestroy_sibling_class";
+    ok( RegisterClassA( &cls ), "RegisterClassA error %lu\n", GetLastError() );
+
+    ncdestroy_parent = CreateWindowExA( 0, "MainWindowClass", NULL, WS_POPUP, 0, 0, 100, 100, 0, 0, 0, NULL );
+    ok( ncdestroy_parent != 0, "CreateWindowExA error %lu\n", GetLastError() );
+    child = CreateWindowExA( 0, "ncdestroy_sibling_class", NULL, WS_CHILD, 0, 0, 10, 10,
+                             ncdestroy_parent, 0, cls.hInstance, NULL );
+    ok( child != 0, "CreateWindowExA error %lu\n", GetLastError() );
+
+    /* Wine unlinks the child from the parent's z-order before it sends WM_NCDESTROY */
+    DestroyWindow( child );
+    DestroyWindow( ncdestroy_parent );
+    UnregisterClassA( "ncdestroy_sibling_class", cls.hInstance );
+}
+
 static void test_FindWindow(void)
 {
     HWND hwnd, found;
@@ -14723,6 +14757,7 @@ START_TEST(win)
 
     /* make sure that these tests are executed first */
     test_FindWindowEx();
+    test_FindWindowEx_ncdestroy();
     test_FindWindow();
     test_SetParent();
 
