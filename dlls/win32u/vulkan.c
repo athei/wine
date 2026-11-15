@@ -25,7 +25,11 @@
 #include "config.h"
 
 #include <dlfcn.h>
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
+#endif
 #include <pthread.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "ntstatus.h"
@@ -41,6 +45,143 @@ static PFN_vkEnumerateInstanceExtensionProperties p_vkEnumerateInstanceExtension
 
 static void *vulkan_handle;
 static struct vulkan_funcs vulkan_funcs;
+
+/* The capture chord, Ctrl+Shift+P, as mtld3d defines it: P going down while
+ * Control and Shift are held and Alt is not, sampled once per present from the
+ * desktop's key state, so a press in any window of the session counts. A
+ * press records CAPTURE_FRAMES presents in each tool ntdll_get_compat_capture()
+ * names, so a tool needs no frame limit of its own:
+ *
+ * - GFXReconstruct until CAPTURE_FRAMES more vkQueuePresentKHR calls of the
+ *   process, on any queue and swapchain, which is how the layer counts frames.
+ * - KosmicKrisp until CAPTURE_FRAMES more presents of the device whose present
+ *   took the press, since the driver keeps the capture per device. The end
+ *   label goes to the queue of the last one, in a call the application
+ *   synchronizes for that queue. */
+#define CAPTURE_FRAMES 3
+
+/* ntdll_get_compat_capture(), read once with the host loader */
+static int capture_mask;
+
+static struct
+{
+    pthread_mutex_t lock;
+    BOOL p_down;       /* P was down at the previous present */
+    UINT frames_left;  /* presents until GFXReconstruct's capture stops, 0 for none */
+    time_t started;    /* the second the last capture started in */
+    BOOL gfxr_missing;
+    void (*gfxr_set_trimming_state)( _Bool );
+    /* the device of KosmicKrisp's running capture, NULL for none */
+    struct vulkan_device *metal_device;
+    UINT metal_left;   /* presents of metal_device until its capture stops */
+} capture = { PTHREAD_MUTEX_INITIALIZER };
+
+static BOOL capture_chord_pressed(void)
+{
+    BOOL p_down = (NtUserGetAsyncKeyState( 'P' ) & 0x8000) != 0;
+    BOOL pressed = p_down && !capture.p_down &&
+                   (NtUserGetAsyncKeyState( VK_CONTROL ) & 0x8000) &&
+                   (NtUserGetAsyncKeyState( VK_SHIFT ) & 0x8000) &&
+                   !(NtUserGetAsyncKeyState( VK_MENU ) & 0x8000);
+
+    capture.p_down = p_down;
+    return pressed;
+}
+
+/* GFXRSetTrimmingState of GFXReconstruct's capture layer, which the Vulkan
+ * loader opened with RTLD_LOCAL, so dlsym( RTLD_DEFAULT ) does not see it:
+ * the layer is found among the loaded images by its file name. */
+static void *capture_find_gfxr(void)
+{
+    static const char name[] = "/libVkLayer_gfxreconstruct.dylib";
+    void *handle;
+#ifdef __APPLE__
+    uint32_t i, count = _dyld_image_count();
+
+    for (i = 0; i < count; i++)
+    {
+        const char *path = _dyld_get_image_name( i );
+        size_t len = path ? strlen( path ) : 0;
+
+        if (len < sizeof(name) - 1 || strcmp( path + len - (sizeof(name) - 1), name )) continue;
+        if ((handle = dlopen( path, RTLD_NOW | RTLD_LOCAL | RTLD_NOLOAD )))
+            return dlsym( handle, "GFXRSetTrimmingState" );
+    }
+#else
+    if ((handle = dlopen( "libVkLayer_gfxreconstruct.so", RTLD_NOW | RTLD_LOCAL | RTLD_NOLOAD )))
+        return dlsym( handle, "GFXRSetTrimmingState" );
+#endif
+    return NULL;
+}
+
+/* Start or stop GFXReconstruct's capture, which the layer does at the frame
+ * boundary after the call. */
+static void capture_gfxr( BOOL on )
+{
+    if (!capture.gfxr_set_trimming_state && !capture.gfxr_missing &&
+        !(capture.gfxr_set_trimming_state = capture_find_gfxr()))
+    {
+        ERR( "GFXRSetTrimmingState not found: GFXReconstruct's capture layer is not loaded\n" );
+        capture.gfxr_missing = TRUE;
+    }
+    if (capture.gfxr_set_trimming_state) capture.gfxr_set_trimming_state( on );
+}
+
+/* Start or stop KosmicKrisp's Metal capture with the work submitted to
+ * queue after the label. */
+static void capture_metal_label( struct vulkan_queue *queue, BOOL on )
+{
+    VkDebugUtilsLabelEXT label = {.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT};
+
+    label.pLabelName = on ? "capture-marker,begin_capture" : "capture-marker,end_capture";
+    queue->device->p_vkQueueInsertDebugUtilsLabelEXT( queue->host.queue, &label );
+}
+
+/* Forget a running Metal capture when its device goes: KosmicKrisp stops
+ * the capture when it destroys the device, so the trace ends there, short
+ * of the presents counted. */
+static void capture_device_destroyed( struct vulkan_device *device )
+{
+    pthread_mutex_lock( &capture.lock );
+    if (capture.metal_device == device) capture.metal_device = NULL;
+    pthread_mutex_unlock( &capture.lock );
+}
+
+/* Called before each present while capture_mask is set. The tools name a
+ * capture after the second it starts in, at the frame boundary after the start,
+ * which can fall into the next second, so a new capture starts only once two
+ * seconds have passed and never takes the name of the one before. */
+static void capture_present( struct vulkan_queue *queue )
+{
+    BOOL pressed, running;
+    time_t now;
+
+    pthread_mutex_lock( &capture.lock );
+    pressed = capture_chord_pressed();
+    running = capture.frames_left || capture.metal_device;
+    if (capture.frames_left && !--capture.frames_left) capture_gfxr( FALSE );
+    if (capture.metal_device == queue->device && !--capture.metal_left)
+    {
+        capture_metal_label( queue, FALSE );
+        capture.metal_device = NULL;
+    }
+    if (!running && pressed && (now = time( NULL )) > capture.started + 1)
+    {
+        capture.started = now;
+        if (capture_mask & WINE_COMPAT_CAPTURE_VULKAN)
+        {
+            capture.frames_left = CAPTURE_FRAMES;
+            capture_gfxr( TRUE );
+        }
+        if ((capture_mask & WINE_COMPAT_CAPTURE_METAL) && queue->device->p_vkQueueInsertDebugUtilsLabelEXT)
+        {
+            capture.metal_device = queue->device;
+            capture.metal_left = CAPTURE_FRAMES;
+            capture_metal_label( queue, TRUE );
+        }
+    }
+    pthread_mutex_unlock( &capture.lock );
+}
 
 WINE_DECLARE_DEBUG_CHANNEL(fps);
 
@@ -438,6 +579,10 @@ static VkResult convert_instance_create_info( struct mempool *pool, VkInstanceCr
     driver_funcs->p_map_instance_extensions( &instance->obj.extensions );
     instance->obj.extensions.has_VK_KHR_win32_surface = 0;
 
+    /* for the queue labels that start and stop KosmicKrisp's Metal capture */
+    if ((capture_mask & WINE_COMPAT_CAPTURE_METAL) && vulkan_funcs.host_extensions.has_VK_EXT_debug_utils)
+        instance->obj.extensions.has_VK_EXT_debug_utils = 1;
+
     if (instance->obj.extensions.has_VK_EXT_debug_utils || instance->obj.extensions.has_VK_EXT_debug_report)
     {
         rb_init( &instance->objects, vulkan_object_compare );
@@ -831,6 +976,7 @@ static void win32u_vkDestroyDevice( VkDevice client_device, const VkAllocationCa
 
     if (!device) return;
 
+    if (capture_mask) capture_device_destroyed( device );
     device->p_vkDestroyDevice( device->host.device, NULL /* pAllocator */ );
     for (i = 0; i < device->queue_count; i++)
         instance->p_remove_object( instance, &device->queues[i].obj );
@@ -2050,6 +2196,7 @@ static VkResult win32u_vkQueuePresentKHR( VkQueue client_queue, const VkPresentI
         client_surface_update( surface->client );
     }
 
+    if (capture_mask) capture_present( queue );
     res = device->p_vkQueuePresentKHR( queue->host.queue, present_info );
 
     for (uint32_t i = 0; i < present_info->swapchainCount; i++)
@@ -3156,6 +3303,7 @@ static void vulkan_init_once(void)
 #undef LOAD_FUNCPTR
 
     driver_funcs = &lazydrv_funcs;
+    capture_mask = ntdll_get_compat_capture();
     vulkan_funcs.p_vkGetInstanceProcAddr = p_vkGetInstanceProcAddr;
     vulkan_funcs.p_vkGetDeviceProcAddr = p_vkGetDeviceProcAddr;
 

@@ -47,6 +47,11 @@ NTSYSAPI const WCHAR *ntdll_get_data_dir(void);
 NTSYSAPI int ntdll_get_compat_dpi_awareness(void);  /* CW Hack 24067 */
 NTSYSAPI int ntdll_get_compat_gcmouse(void);
 NTSYSAPI int ntdll_get_compat_opengl(void);
+NTSYSAPI int ntdll_get_compat_capture(void);
+
+/* the bits of ntdll_get_compat_capture() */
+#define WINE_COMPAT_CAPTURE_VULKAN  0x1  /* GFXReconstruct's capture layer */
+#define WINE_COMPAT_CAPTURE_METAL   0x2  /* KosmicKrisp's Metal capture */
 NTSYSAPI NTSTATUS ntdll_get_dos_file_name( const char *unix_name, WCHAR **dos, UINT disposition );
 NTSYSAPI NTSTATUS ntdll_get_unix_file_name( const WCHAR *dos, char **unix_name, UINT disposition );
 NTSYSAPI NTSTATUS ntdll_unmount_device( int fd, char *mount_point );
