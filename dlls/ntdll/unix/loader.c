@@ -429,6 +429,30 @@ int ntdll_get_compat_opengl(void)
     return compat_opengl;
 }
 
+/* What win32u records when the capture chord is pressed, chosen by
+ * compatdb.so: a mask of WINE_COMPAT_CAPTURE_* bits, 0 for nothing. */
+static int compat_capture;
+
+/***********************************************************************
+ *           set_compat_capture  (ntdll.so)
+ *
+ * Called by compatdb.so.
+ */
+DECLSPEC_EXPORT void set_compat_capture( int value )
+{
+    compat_capture = value;
+}
+
+/***********************************************************************
+ *           ntdll_get_compat_capture  (ntdll.so)
+ *
+ * Read by win32u.
+ */
+int ntdll_get_compat_capture(void)
+{
+    return compat_capture;
+}
+
 static void set_dll_path(void)
 {
     char *p, *path = getenv( "WINEDLLPATH" );
