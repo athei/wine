@@ -1428,6 +1428,60 @@ static bool sub_resource_is_on_cpu(const struct wined3d_texture *texture, unsign
     return false;
 }
 
+/* A source without GPU access ends up in the CPU blitter, which handles the
+ * overlap itself. */
+static bool texture2d_blt_needs_source_copy(const struct wined3d_texture *src_texture,
+        unsigned int src_sub_resource_idx, const RECT *src_rect, const struct wined3d_texture *dst_texture,
+        unsigned int dst_sub_resource_idx, const RECT *dst_rect)
+{
+    RECT overlap_rect;
+
+    return src_texture == dst_texture && src_sub_resource_idx == dst_sub_resource_idx
+            && (src_texture->resource.access & WINED3D_RESOURCE_ACCESS_GPU)
+            && IntersectRect(&overlap_rect, src_rect, dst_rect);
+}
+
+/* OpenGL leaves a copy or blit between overlapping regions of one image
+ * undefined and Vulkan does not allow it, so the source region is copied out
+ * first. */
+static struct wined3d_texture *texture2d_blt_copy_source(struct wined3d_context *context,
+        struct wined3d_texture *texture, unsigned int sub_resource_idx, const RECT *rect)
+{
+    struct wined3d_device *device = texture->resource.device;
+    struct wined3d_resource_desc desc;
+    struct wined3d_texture *staging;
+    DWORD valid_locations;
+    RECT staging_rect;
+    HRESULT hr;
+
+    desc.resource_type = WINED3D_RTYPE_TEXTURE_2D;
+    desc.format = texture->resource.format->id;
+    desc.multisample_type = texture->resource.multisample_type;
+    desc.multisample_quality = texture->resource.multisample_quality;
+    desc.usage = WINED3DUSAGE_CS;
+    desc.bind_flags = texture->resource.bind_flags;
+    desc.access = WINED3D_RESOURCE_ACCESS_GPU;
+    desc.width = rect->right - rect->left;
+    desc.height = rect->bottom - rect->top;
+    desc.depth = 1;
+    desc.size = 0;
+
+    if (FAILED(hr = wined3d_texture_create(device, &desc, 1, 1, 0, NULL, NULL, &wined3d_null_parent_ops, &staging)))
+    {
+        WARN("Failed to create staging texture, hr %#lx.\n", hr);
+        return NULL;
+    }
+
+    SetRect(&staging_rect, 0, 0, desc.width, desc.height);
+    valid_locations = device->blitter->ops->blitter_blit(device->blitter, WINED3D_BLIT_OP_RAW_BLIT, context,
+            texture, sub_resource_idx, texture->resource.draw_binding, rect,
+            staging, 0, staging->resource.draw_binding, &staging_rect, NULL, WINED3D_TEXF_NONE, NULL);
+    wined3d_texture_validate_location(staging, 0, valid_locations);
+    wined3d_texture_invalidate_location(staging, 0, ~valid_locations);
+
+    return staging;
+}
+
 HRESULT texture2d_blt(struct wined3d_texture *dst_texture, unsigned int dst_sub_resource_idx,
         const struct wined3d_box *dst_box, struct wined3d_texture *src_texture, unsigned int src_sub_resource_idx,
         const struct wined3d_box *src_box, uint32_t flags, const struct wined3d_blt_fx *fx,
@@ -1436,6 +1490,7 @@ HRESULT texture2d_blt(struct wined3d_texture *dst_texture, unsigned int dst_sub_
     struct wined3d_texture_sub_resource *src_sub_resource, *dst_sub_resource;
     struct wined3d_device *device = dst_texture->resource.device;
     struct wined3d_swapchain *src_swapchain, *dst_swapchain;
+    struct wined3d_texture *staging_texture = NULL;
     BOOL scale, convert, resolve, resolve_typeless = FALSE;
     const struct wined3d_format *resolve_format = NULL;
     const struct wined3d_color_key *colour_key = NULL;
@@ -1546,9 +1601,25 @@ HRESULT texture2d_blt(struct wined3d_texture *dst_texture, unsigned int dst_sub_
             blit_op = WINED3D_BLIT_OP_DEPTH_BLIT;
 
         context = context_acquire(device, dst_texture, dst_sub_resource_idx);
+
+        /* The CPU blitter does not do depth blits, so without a staging
+         * texture the blit goes ahead as it is. */
+        if (texture2d_blt_needs_source_copy(src_texture, src_sub_resource_idx, &src_rect,
+                dst_texture, dst_sub_resource_idx, &dst_rect)
+                && (staging_texture = texture2d_blt_copy_source(context, src_texture, src_sub_resource_idx, &src_rect)))
+        {
+            src_texture = staging_texture;
+            src_sub_resource_idx = 0;
+            OffsetRect(&src_rect, -src_rect.left, -src_rect.top);
+        }
+
         valid_locations = device->blitter->ops->blitter_blit(device->blitter, blit_op, context,
                 src_texture, src_sub_resource_idx, src_texture->resource.draw_binding, &src_rect,
                 dst_texture, dst_sub_resource_idx, dst_location, &dst_rect, NULL, filter, resolve_format);
+
+        if (staging_texture)
+            wined3d_texture_decref(staging_texture);
+
         context_release(context);
 
         wined3d_texture_validate_location(dst_texture, dst_sub_resource_idx, valid_locations);
@@ -1673,6 +1744,19 @@ HRESULT texture2d_blt(struct wined3d_texture *dst_texture, unsigned int dst_sub_
 
     context = context_acquire(device, dst_texture, dst_sub_resource_idx);
 
+    if (texture2d_blt_needs_source_copy(src_texture, src_sub_resource_idx, &src_rect,
+            dst_texture, dst_sub_resource_idx, &dst_rect))
+    {
+        if (!(staging_texture = texture2d_blt_copy_source(context, src_texture, src_sub_resource_idx, &src_rect)))
+        {
+            context_release(context);
+            goto cpu;
+        }
+        src_texture = staging_texture;
+        src_sub_resource_idx = 0;
+        OffsetRect(&src_rect, -src_rect.left, -src_rect.top);
+    }
+
     if (!(dst_texture->resource.access & WINED3D_RESOURCE_ACCESS_GPU))
         dst_location = dst_texture->resource.map_binding;
     else if (dst_texture->resource.multisample_type != WINED3D_MULTISAMPLE_NONE
@@ -1684,6 +1768,9 @@ HRESULT texture2d_blt(struct wined3d_texture *dst_texture, unsigned int dst_sub_
     valid_locations = device->blitter->ops->blitter_blit(device->blitter, blit_op, context,
             src_texture, src_sub_resource_idx, src_texture->resource.draw_binding, &src_rect,
             dst_texture, dst_sub_resource_idx, dst_location, &dst_rect, colour_key, filter, resolve_format);
+
+    if (staging_texture)
+        wined3d_texture_decref(staging_texture);
 
     context_release(context);
 
