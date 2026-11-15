@@ -4426,6 +4426,18 @@ void macdrv_window_release_ca_layer_host_view(WineWindow *window, unsigned int c
 }
 }
 
+/* Host the layer of another process in a view of macdrv_create_view, over
+ * its whole frame. macdrv_dispose_view releases the host with the view. */
+void macdrv_view_create_ca_layer_host(WineContentView *view, unsigned int context_id)
+{
+@autoreleasepool
+{
+    OnMainThread(^{
+        [view addCALayerHostViewWithContextId:context_id];
+    });
+}
+}
+
 bool macdrv_get_view_backing_size(WineContentView *view, int backing_size[2])
 {
     if (![view isKindOfClass:[WineContentView class]])

@@ -256,6 +256,9 @@ struct macdrv_win_data
     unsigned int        fullscreen : 1;         /* is the window visible rect fullscreen? (unrelated to native AppKit/Cocoa fullscreen) */
     CFMutableArrayRef   d3dmetal_client_surfaces; /* client surfaces created through macdrv_functions */
     struct client_overlay client_overlay;
+    struct remote_layer *remote_layers;         /* layers other processes render into this child window */
+    unsigned int        remote_layer_count;
+    unsigned int        remote_layer_serial;    /* see place_remote_layers */
 };
 
 struct macdrv_client_surface
