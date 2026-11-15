@@ -523,6 +523,7 @@ extern CAMetalLayer *macdrv_swapchain_get_layer(WineMetalSwapChain_id swapchain)
 extern void macdrv_destroy_swapchain(WineMetalSwapChain_id swapchain);
 extern void macdrv_window_create_ca_layer_host_view(WineWindow *window, unsigned int context_id);
 extern void macdrv_window_release_ca_layer_host_view(WineWindow *window, unsigned int context_id);
+extern void macdrv_view_create_ca_layer_host(WineContentView *view, unsigned int context_id);
 extern void macdrv_create_remote_layer(void* hwnd, unsigned int context_id);
 extern void macdrv_release_remote_layer(void* hwnd, unsigned int context_id);
 extern bool macdrv_get_view_backing_size(WineContentView *view, int backing_size[2]);
