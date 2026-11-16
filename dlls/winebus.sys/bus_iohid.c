@@ -381,6 +381,12 @@ exit:
     if (!ret) desc->bus_type = BUS_TYPE_UNKNOWN;
 }
 
+static BOOL is_joystick_or_gamepad(const USAGE_AND_PAGE *usages)
+{
+    return usages->UsagePage == HID_USAGE_PAGE_GENERIC &&
+           (usages->Usage == HID_USAGE_GENERIC_JOYSTICK || usages->Usage == HID_USAGE_GENERIC_GAMEPAD);
+}
+
 static void handle_DeviceMatchingCallback(void *context, IOReturn result, void *sender, IOHIDDeviceRef IOHIDDevice)
 {
     struct device_desc desc =
@@ -409,8 +415,7 @@ static void handle_DeviceMatchingCallback(void *context, IOReturn result, void *
             desc.bus_type = BUS_TYPE_USB;
     }
 
-    if (usages.UsagePage != HID_USAGE_PAGE_GENERIC ||
-        !(usages.Usage == HID_USAGE_GENERIC_JOYSTICK || usages.Usage == HID_USAGE_GENERIC_GAMEPAD))
+    if (!is_joystick_or_gamepad(&usages))
     {
         /* winebus isn't currently meant to handle anything but these, and
          * opening keyboards, mice, or the Touch Bar on older MacBooks triggers
@@ -467,6 +472,91 @@ static void handle_RemovalCallback(void *context, IOReturn result, void *sender,
     impl = find_device_from_iohid(IOHIDDevice);
     if (impl) bus_event_queue_device_removed(&event_queue, &impl->unix_device);
     else WARN("failed to find device for iohid device %p\n", IOHIDDevice);
+}
+
+static BOOL report_descriptor_has_pid(const UInt8 *desc, CFIndex length)
+{
+    CFIndex pos = 0;
+
+    while (pos < length)
+    {
+        UInt8 prefix = desc[pos], size = prefix & 3, type = (prefix >> 2) & 3, tag = prefix >> 4;
+        UInt32 value = 0;
+        UInt8 i;
+
+        if (prefix == 0xfe) /* long item: size, tag, then size bytes of data */
+        {
+            if (length - pos < 3) return FALSE;
+            pos += 3 + desc[pos + 1];
+            continue;
+        }
+
+        if (size == 3) size = 4;
+        if (length - pos - 1 < size) return FALSE;
+        for (i = 0; i < size; i++) value |= (UInt32)desc[pos + 1 + i] << (8 * i);
+        pos += 1 + size;
+
+        /* a global Usage Page item, or a local Usage item with its usage page in the high word */
+        if (type == 1 && tag == 0 && value == HID_USAGE_PAGE_PID) return TRUE;
+        if (type == 2 && tag == 0 && size == 4 && (value >> 16) == HID_USAGE_PAGE_PID) return TRUE;
+    }
+
+    return FALSE;
+}
+
+static BOOL set_matching_number(CFMutableDictionaryRef matching, CFStringRef key, SInt32 value)
+{
+    CFNumberRef number;
+
+    if (!(number = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &value))) return FALSE;
+    CFDictionarySetValue(matching, key, number);
+    CFRelease(number);
+    return TRUE;
+}
+
+NTSTATUS iohid_device_has_pid(void *args)
+{
+    struct iohid_device_has_pid_params *params = args;
+    CFMutableDictionaryRef matching;
+    io_iterator_t iterator;
+    io_service_t service;
+    CFTypeRef data;
+
+    params->has_pid = FALSE;
+
+    if (!(matching = IOServiceMatching(kIOHIDDeviceKey))) return STATUS_NO_MEMORY;
+    if (!set_matching_number(matching, CFSTR(kIOHIDVendorIDKey), params->vid) ||
+        !set_matching_number(matching, CFSTR(kIOHIDProductIDKey), params->pid))
+    {
+        CFRelease(matching);
+        return STATUS_NO_MEMORY;
+    }
+
+    /* IOServiceGetMatchingServices releases the matching dictionary */
+    if (IOServiceGetMatchingServices(0, matching, &iterator) != KERN_SUCCESS) return STATUS_UNSUCCESSFUL;
+
+    while (!params->has_pid && (service = IOIteratorNext(iterator)))
+    {
+        USAGE_AND_PAGE usages;
+        UINT value;
+
+        /* only a service handle_DeviceMatchingCallback also takes, or the device would get no copy at all */
+        usages.UsagePage = get_ioregistry_number_value(service, CFSTR(kIOHIDPrimaryUsagePageKey), &value) ? value : 0;
+        usages.Usage = get_ioregistry_number_value(service, CFSTR(kIOHIDPrimaryUsageKey), &value) ? value : 0;
+
+        if (is_joystick_or_gamepad(&usages) &&
+            (data = IORegistryEntryCreateCFProperty(service, CFSTR(kIOHIDReportDescriptorKey), kCFAllocatorDefault, 0)))
+        {
+            if (CFGetTypeID(data) == CFDataGetTypeID())
+                params->has_pid = report_descriptor_has_pid(CFDataGetBytePtr(data), CFDataGetLength(data));
+            CFRelease(data);
+        }
+        IOObjectRelease(service);
+    }
+    IOObjectRelease(iterator);
+
+    TRACE("vid %04x, pid %04x, has_pid %u.\n", params->vid, params->pid, params->has_pid);
+    return STATUS_SUCCESS;
 }
 
 NTSTATUS iohid_bus_init(void *args)
@@ -540,6 +630,13 @@ NTSTATUS iohid_bus_wait(void *args)
 NTSTATUS iohid_bus_stop(void *args)
 {
     WARN("IOHID support not compiled in!\n");
+    return STATUS_NOT_IMPLEMENTED;
+}
+
+NTSTATUS iohid_device_has_pid(void *args)
+{
+    struct iohid_device_has_pid_params *params = args;
+    params->has_pid = FALSE;
     return STATUS_NOT_IMPLEMENTED;
 }
 

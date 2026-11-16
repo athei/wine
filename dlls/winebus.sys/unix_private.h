@@ -233,6 +233,7 @@ extern NTSTATUS udev_bus_stop(void *);
 extern NTSTATUS iohid_bus_init(void *);
 extern NTSTATUS iohid_bus_wait(void *);
 extern NTSTATUS iohid_bus_stop(void *);
+extern NTSTATUS iohid_device_has_pid(void *);
 
 extern void bus_event_cleanup(struct bus_event *event);
 extern void bus_event_queue_destroy(struct list *queue);
