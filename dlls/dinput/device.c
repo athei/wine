@@ -787,7 +787,7 @@ static HRESULT WINAPI dinput_device_EnumObjects( IDirectInputDevice8W *iface, LP
     return DI_OK;
 }
 
-static HRESULT enum_object_filter_init( struct dinput_device *impl, DIPROPHEADER *filter )
+HRESULT enum_object_filter_init( struct dinput_device *impl, DIPROPHEADER *filter )
 {
     DIOBJECTDATAFORMAT *user_objs = impl->user_format.rgodf;
     DWORD i, count = impl->device_format.dwNumObjs;

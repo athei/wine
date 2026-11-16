@@ -635,7 +635,16 @@ static void test_periodic_effect( IDirectInputDevice8W *device, HANDLE file, DWO
         .lpvTypeSpecificParams = (void *)&expect_periodic_0,
     };
     struct check_created_effect_params check_params = {0};
-    IDirectInputEffect *effect;
+    IDirectInputEffect *effect, *offsets_effect;
+    DWORD offsets_axes[3] = {DIJOFS_Z, DIJOFS_X, DIJOFS_Y};
+    DIEFFECT offsets_desc =
+    {
+        .dwSize = sizeof(DIEFFECT_DX5),
+        .dwFlags = DIEFF_OBJECTOFFSETS,
+        .dwTriggerButton = DIJOFS_BUTTON( 0 ),
+        .cAxes = 3,
+        .rgdwAxes = offsets_axes,
+    };
     DIPERIODIC periodic = {0};
     DIENVELOPE envelope = {0};
     LONG directions[4] = {0};
@@ -990,6 +999,24 @@ static void test_periodic_effect( IDirectInputDevice8W *device, HANDLE file, DWO
     ok( desc.rgdwAxes[0] == 8, "got %#lx expected %#x\n", desc.rgdwAxes[0], 8 );
     ok( desc.rgdwAxes[1] == 0, "got %#lx expected %#x\n", desc.rgdwAxes[1], 0 );
     ok( desc.rgdwAxes[2] == 4, "got %#lx expected %#x\n", desc.rgdwAxes[2], 4 );
+
+    /* axes and trigger button set by their offsets in the data format */
+    hr = IDirectInputDevice8_CreateEffect( device, &GUID_Sine, NULL, &offsets_effect, NULL );
+    ok( hr == DI_OK, "CreateEffect returned %#lx\n", hr );
+    hr = IDirectInputEffect_SetParameters( offsets_effect, &offsets_desc, DIEP_AXES | DIEP_TRIGGERBUTTON | DIEP_NODOWNLOAD );
+    ok( hr == DI_DOWNLOADSKIPPED, "SetParameters returned %#lx\n", hr );
+    offsets_desc.dwFlags = DIEFF_OBJECTIDS;
+    offsets_desc.dwTriggerButton = 0;
+    memset( offsets_axes, 0, sizeof(offsets_axes) );
+    hr = IDirectInputEffect_GetParameters( offsets_effect, &offsets_desc, DIEP_AXES | DIEP_TRIGGERBUTTON );
+    ok( hr == DI_OK, "GetParameters returned %#lx\n", hr );
+    check_member( offsets_desc, expect_desc, "%#lx", dwTriggerButton );
+    check_member( offsets_desc, expect_desc, "%lu", cAxes );
+    check_member( offsets_desc, expect_desc, "%#lx", rgdwAxes[0] );
+    check_member( offsets_desc, expect_desc, "%#lx", rgdwAxes[1] );
+    check_member( offsets_desc, expect_desc, "%#lx", rgdwAxes[2] );
+    ref = IDirectInputEffect_Release( offsets_effect );
+    ok( ref == 0, "Release returned %ld\n", ref );
 
     hr = IDirectInputEffect_Download( effect );
     ok( hr == DIERR_INCOMPLETEEFFECT, "Download returned %#lx\n", hr );

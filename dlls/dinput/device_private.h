@@ -129,6 +129,7 @@ extern void dinput_device_internal_release( struct dinput_device *device );
 
 extern HRESULT dinput_device_init_device_format( IDirectInputDevice8W *iface );
 extern int dinput_device_object_index_from_id( IDirectInputDevice8W *iface, DWORD id );
+extern HRESULT enum_object_filter_init( struct dinput_device *impl, DIPROPHEADER *filter );
 extern BOOL device_object_matches_semantic( const DIDEVICEINSTANCEW *instance, const DIOBJECTDATAFORMAT *object,
                                             DWORD semantic, BOOL exact );
 

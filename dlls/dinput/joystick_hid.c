@@ -2834,8 +2834,10 @@ static HRESULT WINAPI hid_joystick_effect_SetParameters( IDirectInputEffect *ifa
         for (i = 0; i < params->cAxes; ++i)
         {
             filter.dwObj = params->rgdwAxes[i];
-            ret = enum_objects( impl->joystick, &filter, DIDFT_AXIS, set_parameters_object,
-                                &impl->params.rgdwAxes[i] );
+            if (FAILED(enum_object_filter_init( &impl->joystick->base, &filter )))
+                ret = DIENUM_CONTINUE;
+            else ret = enum_objects( impl->joystick, &filter, DIDFT_AXIS, set_parameters_object,
+                                     &impl->params.rgdwAxes[i] );
             if (ret != DIENUM_STOP) impl->params.rgdwAxes[i] = 0;
         }
 
@@ -2953,8 +2955,10 @@ static HRESULT WINAPI hid_joystick_effect_SetParameters( IDirectInputEffect *ifa
 
         filter.dwObj = params->dwTriggerButton;
         old_value = impl->params.dwTriggerButton;
-        ret = enum_objects( impl->joystick, &filter, DIDFT_BUTTON, set_parameters_object,
-                            &impl->params.dwTriggerButton );
+        if (FAILED(enum_object_filter_init( &impl->joystick->base, &filter )))
+            ret = DIENUM_CONTINUE;
+        else ret = enum_objects( impl->joystick, &filter, DIDFT_BUTTON, set_parameters_object,
+                                 &impl->params.dwTriggerButton );
         if (ret != DIENUM_STOP) impl->params.dwTriggerButton = -1;
         if (impl->params.dwTriggerButton != old_value) impl->modified |= DIEP_TRIGGERBUTTON;
     }
