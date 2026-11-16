@@ -3703,6 +3703,9 @@ DWORD WINAPI monitor_thread_proc( void *stop_event )
 
 void dinput_test_init_( const char *file, int line )
 {
+    BOOL (WINAPI *pIsWow64Process2)( HANDLE, USHORT *, USHORT * );
+    USHORT machine, native_machine;
+    IMAGE_NT_HEADERS *nt;
     BOOL is_wow64;
 
     monitor_stop = CreateEventW( NULL, FALSE, FALSE, NULL );
@@ -3723,6 +3726,17 @@ void dinput_test_init_( const char *file, int line )
     if (IsWow64Process( GetCurrentProcess(), &is_wow64 ) && is_wow64)
     {
         skip_(file, line)( "Skipping driver tests: running in wow64.\n" );
+        return;
+    }
+
+    /* an ARM64 system loads no x86_64 drivers, though it runs x86_64 code */
+    pIsWow64Process2 = (void *)GetProcAddress( GetModuleHandleW( L"kernel32.dll" ), "IsWow64Process2" );
+    nt = (IMAGE_NT_HEADERS *)((char *)instance + ((IMAGE_DOS_HEADER *)instance)->e_lfanew);
+    if (pIsWow64Process2 && pIsWow64Process2( GetCurrentProcess(), &machine, &native_machine ) &&
+        native_machine != nt->FileHeader.Machine)
+    {
+        skip_(file, line)( "Skipping driver tests: native machine %#x, test machine %#x.\n",
+                           native_machine, nt->FileHeader.Machine );
         return;
     }
 
