@@ -33,6 +33,7 @@
 #include "hidusage.h"
 
 #include "dinput_test.h"
+#include "effect_file.h"
 
 #include "wine/hid.h"
 
@@ -3297,6 +3298,259 @@ done:
     winetest_pop_context();
 }
 
+struct check_file_effects_params
+{
+    UINT index;
+    UINT expect_count;
+    UINT stop_index;
+    const struct ffe_effect_header *const *expect;
+};
+
+/* Returns the data of the chunk at *pos and moves *pos past it. */
+static const BYTE *next_ffe_data( const BYTE **pos, DWORD *size )
+{
+    const struct ffe_chunk *chunk = (const struct ffe_chunk *)*pos;
+    *size = chunk->size;
+    *pos = (const BYTE *)(chunk + 1) + chunk->size;
+    return (const BYTE *)(chunk + 1);
+}
+
+static BOOL CALLBACK check_file_effects( const DIFILEEFFECT *file_effect, void *args )
+{
+    struct check_file_effects_params *params = args;
+    const struct ffe_effect_header *expect;
+    const DIEFFECT *effect;
+    const BYTE *pos, *data;
+    DWORD i, size;
+
+    winetest_push_context( "effect[%u]", params->index );
+
+    ok( params->index < params->expect_count, "unexpected extra effect\n" );
+    if (params->index >= params->expect_count)
+    {
+        winetest_pop_context();
+        return DIENUM_STOP;
+    }
+    expect = params->expect[params->index];
+
+    ok( file_effect->dwSize == sizeof(DIFILEEFFECT), "got dwSize %lu\n", file_effect->dwSize );
+    ok( IsEqualGUID( &file_effect->GuidEffect, &expect->guid ), "got GuidEffect %s\n",
+        debugstr_guid( &file_effect->GuidEffect ) );
+    ok( !strcmp( file_effect->szFriendlyName, expect->name ), "got szFriendlyName %s\n",
+        debugstr_a( file_effect->szFriendlyName ) );
+
+    effect = file_effect->lpDiEffect;
+    ok( !!effect, "got lpDiEffect NULL\n" );
+    if (!effect)
+    {
+        winetest_pop_context();
+        params->index++;
+        return DIENUM_CONTINUE;
+    }
+
+    ok( effect->dwSize == sizeof(DIEFFECT_DX6), "got dwSize %lu\n", effect->dwSize );
+    check_member( *effect, expect->effect, "%#lx", dwFlags );
+    check_member( *effect, expect->effect, "%lu", dwDuration );
+    check_member( *effect, expect->effect, "%lu", dwSamplePeriod );
+    check_member( *effect, expect->effect, "%lu", dwGain );
+    check_member( *effect, expect->effect, "%#lx", dwTriggerButton );
+    check_member( *effect, expect->effect, "%lu", dwTriggerRepeatInterval );
+    check_member( *effect, expect->effect, "%lu", cAxes );
+    check_member( *effect, expect->effect, "%lu", cbTypeSpecificParams );
+    check_member( *effect, expect->effect, "%lu", dwStartDelay );
+
+    /* the data chunks follow the header, one for each pointer field that is set */
+    pos = (const BYTE *)(expect + 1);
+
+    if (!expect->effect.rgdwAxes) ok( !effect->rgdwAxes, "got rgdwAxes %p\n", effect->rgdwAxes );
+    else
+    {
+        data = next_ffe_data( &pos, &size );
+        ok( !!effect->rgdwAxes, "got rgdwAxes NULL\n" );
+        for (i = 0; effect->rgdwAxes && i < effect->cAxes && i < size / sizeof(DWORD); i++)
+            ok( effect->rgdwAxes[i] == ((const DWORD *)data)[i], "got rgdwAxes[%lu] %#lx\n", i, effect->rgdwAxes[i] );
+    }
+
+    if (!expect->effect.rglDirection) ok( !effect->rglDirection, "got rglDirection %p\n", effect->rglDirection );
+    else
+    {
+        data = next_ffe_data( &pos, &size );
+        ok( !!effect->rglDirection, "got rglDirection NULL\n" );
+        for (i = 0; effect->rglDirection && i < effect->cAxes && i < size / sizeof(LONG); i++)
+            ok( effect->rglDirection[i] == ((const LONG *)data)[i], "got rglDirection[%lu] %ld\n",
+                i, effect->rglDirection[i] );
+    }
+
+    if (!expect->effect.lpEnvelope) ok( !effect->lpEnvelope, "got lpEnvelope %p\n", effect->lpEnvelope );
+    else
+    {
+        const DIENVELOPE *expect_envelope = (const DIENVELOPE *)next_ffe_data( &pos, &size );
+        ok( !!effect->lpEnvelope, "got lpEnvelope NULL\n" );
+        if (effect->lpEnvelope)
+        {
+            check_member( *effect->lpEnvelope, *expect_envelope, "%lu", dwSize );
+            check_member( *effect->lpEnvelope, *expect_envelope, "%lu", dwAttackLevel );
+            check_member( *effect->lpEnvelope, *expect_envelope, "%lu", dwAttackTime );
+            check_member( *effect->lpEnvelope, *expect_envelope, "%lu", dwFadeLevel );
+            check_member( *effect->lpEnvelope, *expect_envelope, "%lu", dwFadeTime );
+        }
+    }
+
+    if (!expect->effect.lpvTypeSpecificParams)
+        ok( !effect->lpvTypeSpecificParams, "got lpvTypeSpecificParams %p\n", effect->lpvTypeSpecificParams );
+    else
+    {
+        data = next_ffe_data( &pos, &size );
+        ok( !!effect->lpvTypeSpecificParams, "got lpvTypeSpecificParams NULL\n" );
+        if (effect->lpvTypeSpecificParams && effect->cbTypeSpecificParams == expect->effect.cbTypeSpecificParams)
+            ok( !memcmp( effect->lpvTypeSpecificParams, data, effect->cbTypeSpecificParams ),
+                "got different type-specific parameters\n" );
+    }
+
+    winetest_pop_context();
+
+    return params->index++ == params->stop_index ? DIENUM_STOP : DIENUM_CONTINUE;
+}
+
+static void write_test_file( const WCHAR *path, const void *data, DWORD size )
+{
+    DWORD written;
+    HANDLE file;
+    BOOL ret;
+
+    file = CreateFileW( path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL );
+    ok( file != INVALID_HANDLE_VALUE, "CreateFileW failed, error %lu\n", GetLastError() );
+    ret = WriteFile( file, data, size, &written, NULL );
+    ok( ret, "WriteFile failed, error %lu\n", GetLastError() );
+    ok( written == size, "got written %lu\n", written );
+    CloseHandle( file );
+}
+
+#define check_effects_in_file( a, b, c, d, e ) check_effects_in_file_( __LINE__, a, b, c, d, e )
+static void check_effects_in_file_( int line, IDirectInputDevice8W *device, const WCHAR *path, DWORD flags,
+                                    HRESULT expect_hr, UINT expect_count )
+{
+    static const struct ffe_effect_header *const expect_standard[] =
+    {
+        &ffe_file.effects.spring.header,
+        &ffe_file.effects.constant.header,
+        &ffe_file.effects.sine.header,
+    };
+    static const struct ffe_effect_header *const expect_all[] =
+    {
+        &ffe_file.effects.spring.header,
+        &ffe_file.effects.constant.header,
+        &ffe_file.effects.sine.header,
+        &ffe_file.effects.vendor.header,
+    };
+    struct check_file_effects_params params = {.stop_index = ~0u};
+    HRESULT hr;
+
+    if (flags & DIFEF_INCLUDENONSTANDARD)
+    {
+        params.expect = expect_all;
+        params.expect_count = ARRAY_SIZE(expect_all);
+    }
+    else
+    {
+        params.expect = expect_standard;
+        params.expect_count = ARRAY_SIZE(expect_standard);
+    }
+
+    hr = IDirectInputDevice8_EnumEffectsInFile( device, path, check_file_effects, &params, flags );
+    ok_(__FILE__, line)( hr == expect_hr, "EnumEffectsInFile returned %#lx\n", hr );
+    ok_(__FILE__, line)( params.index == expect_count, "got %u effects\n", params.index );
+}
+
+static void test_effects_in_file(void)
+{
+    static const struct ffe_effect_header *const expect_first[] = {&ffe_file.effects.spring.header};
+    struct
+    {
+        struct ffe_file file;
+        BYTE junk[8];
+    } trailing = {.file = ffe_file, .junk = {0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc}};
+    struct
+    {
+        char riff[4];
+        DWORD riff_size;
+        char form[4];
+        GUID header;
+        struct ffe_chunk note;
+        BYTE note_data[4]; /* three bytes and the pad byte */
+        struct ffe_effects effects;
+    } odd =
+    {
+        .riff = {'R','I','F','F'},
+        .riff_size = sizeof(odd) - sizeof(struct ffe_chunk),
+        .form = {'F','O','R','C'},
+        .header = ffe_file.header,
+        .note = {.id = {'n','o','t','e'}, .size = 3},
+        .note_data = {1, 2, 3, 0},
+        .effects = ffe_file.effects,
+    };
+    struct check_file_effects_params params = {0};
+    WCHAR temp[MAX_PATH], path[MAX_PATH];
+    struct ffe_file copy = ffe_file;
+    IDirectInputDevice8W *device;
+    HRESULT hr;
+    ULONG ref;
+    UINT len;
+    BOOL ret;
+
+    if (FAILED(create_dinput_device( 0x800, &GUID_SysMouse, &device ))) return;
+
+    len = GetTempPathW( ARRAY_SIZE(temp), temp );
+    ok( len, "GetTempPathW failed, error %lu\n", GetLastError() );
+    len = GetTempFileNameW( temp, L"ffe", 0, path );
+    ok( len, "GetTempFileNameW failed, error %lu\n", GetLastError() );
+    if (!len) goto done;
+    write_test_file( path, &ffe_file, sizeof(ffe_file) );
+
+    hr = IDirectInputDevice8_EnumEffectsInFile( device, NULL, check_file_effects, &params, 0 );
+    ok( hr == DIERR_INVALIDPARAM, "EnumEffectsInFile returned %#lx\n", hr );
+    hr = IDirectInputDevice8_EnumEffectsInFile( device, path, NULL, &params, 0 );
+    ok( hr == DIERR_INVALIDPARAM, "EnumEffectsInFile returned %#lx\n", hr );
+
+    check_effects_in_file( device, path, DIFEF_DEFAULT, DI_OK, 3 );
+    check_effects_in_file( device, path, DIFEF_INCLUDENONSTANDARD, DI_OK, 4 );
+
+    params.expect = expect_first;
+    params.expect_count = ARRAY_SIZE(expect_first);
+    params.stop_index = 0;
+    hr = IDirectInputDevice8_EnumEffectsInFile( device, path, check_file_effects, &params, DIFEF_INCLUDENONSTANDARD );
+    ok( hr == DI_OK, "EnumEffectsInFile returned %#lx\n", hr );
+    ok( params.index == 1, "got %u effects\n", params.index );
+
+    /* a RIFF size of 0, as some files have */
+    copy.riff_size = 0;
+    write_test_file( path, &copy, sizeof(copy) );
+    check_effects_in_file( device, path, DIFEF_INCLUDENONSTANDARD, DI_OK, 4 );
+
+    /* bytes after the end of the RIFF form */
+    write_test_file( path, &trailing, sizeof(trailing) );
+    check_effects_in_file( device, path, DIFEF_INCLUDENONSTANDARD, DI_OK, 4 );
+
+    /* a chunk of an odd size, followed by its pad byte */
+    write_test_file( path, &odd, sizeof(odd) );
+    check_effects_in_file( device, path, DIFEF_INCLUDENONSTANDARD, DI_OK, 4 );
+
+    /* a file that ends in the middle of the second effect */
+    write_test_file( path, &ffe_file, offsetof(struct ffe_file, effects.constant.directions) );
+    check_effects_in_file( device, path, 0, DIERR_INVALIDPARAM, 1 );
+
+    write_test_file( path, &ffe_file.effects.spring, sizeof(ffe_file.effects.spring) );
+    check_effects_in_file( device, path, 0, DIERR_INVALIDPARAM, 0 );
+
+    ret = DeleteFileW( path );
+    ok( ret, "DeleteFileW failed, error %lu\n", GetLastError() );
+    check_effects_in_file( device, path, 0, HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND), 0 );
+
+done:
+    ref = IDirectInputDevice8_Release( device );
+    ok( ref == 0, "Release returned %ld\n", ref );
+}
+
 START_TEST(device8)
 {
     dinput_test_init();
@@ -3316,6 +3570,8 @@ START_TEST(device8)
     test_sys_keyboard( 0x500 );
     test_sys_keyboard( 0x700 );
     test_sys_keyboard( 0x800 );
+
+    test_effects_in_file();
 
     test_sys_keyboard_action_format();
 

@@ -1781,13 +1781,257 @@ static HRESULT WINAPI dinput_device_SendDeviceData( IDirectInputDevice8W *iface,
     return DI_OK;
 }
 
+/* An effect file is a RIFF form 'FORC' with a 16-byte header, followed by a
+ * LIST 'efct' for each effect. Each one holds a 64-byte name, the DIEFFECT in
+ * its 32-bit layout, the effect GUID, a DWORD, and a 'data' chunk for each
+ * of the axes, the directions, the envelope and the type-specific parameters
+ * whose pointer field is not 0. The files seen hold the DIEP_* flag of the
+ * member there, not an address. */
+struct file_effect
+{
+    DWORD dwSize;
+    DWORD dwFlags;
+    DWORD dwDuration;
+    DWORD dwSamplePeriod;
+    DWORD dwGain;
+    DWORD dwTriggerButton;
+    DWORD dwTriggerRepeatInterval;
+    DWORD cAxes;
+    DWORD rgdwAxes;
+    DWORD rglDirection;
+    DWORD lpEnvelope;
+    DWORD cbTypeSpecificParams;
+    DWORD lpvTypeSpecificParams;
+    DWORD dwStartDelay;
+};
+
+#define FILE_EFFECT_DX5_SIZE FIELD_OFFSET( struct file_effect, dwStartDelay )
+#define FILE_EFFECT_NAME_SIZE 64
+
+/* Reads the chunk at *pos, which must not be past size, and moves *pos past it. */
+static BOOL read_riff_chunk( const BYTE *data, DWORD size, DWORD *pos, const BYTE **id,
+                             const BYTE **chunk, DWORD *chunk_size )
+{
+    DWORD len;
+
+    if (size - *pos < 8) return FALSE;
+    memcpy( &len, data + *pos + 4, sizeof(len) );
+    if (len > size - *pos - 8) return FALSE;
+
+    *id = data + *pos;
+    *chunk = data + *pos + 8;
+    *chunk_size = len;
+    *pos += 8 + len;
+    if ((len & 1) && *pos < size) *pos += 1;
+    return TRUE;
+}
+
+static BOOL is_standard_effect( const GUID *guid )
+{
+    static const GUID *standard_effects[] =
+    {
+        &GUID_ConstantForce,
+        &GUID_RampForce,
+        &GUID_Square,
+        &GUID_Sine,
+        &GUID_Triangle,
+        &GUID_SawtoothUp,
+        &GUID_SawtoothDown,
+        &GUID_Spring,
+        &GUID_Damper,
+        &GUID_Inertia,
+        &GUID_Friction,
+        &GUID_CustomForce,
+    };
+    UINT i;
+
+    for (i = 0; i < ARRAY_SIZE(standard_effects); i++)
+        if (IsEqualGUID( guid, standard_effects[i] )) return TRUE;
+    return FALSE;
+}
+
+/* Fills info and effect from the contents of a LIST 'efct' chunk, copying the
+ * variable parts into params, which must have room for list_size bytes. */
+static BOOL parse_file_effect( const BYTE *list, DWORD list_size, DIFILEEFFECT *info, DIEFFECT *effect,
+                               DIENVELOPE *envelope, BYTE *params )
+{
+    const BYTE *chunks[4], *id;
+    DWORD sizes[4], pos, i;
+    struct file_effect file = {0};
+    BOOL present[4];
+
+    pos = FILE_EFFECT_NAME_SIZE;
+    if (list_size < pos + sizeof(file.dwSize)) return FALSE;
+    memcpy( &file.dwSize, list + pos, sizeof(file.dwSize) );
+    if (file.dwSize != sizeof(file) && file.dwSize != FILE_EFFECT_DX5_SIZE) return FALSE;
+    if (list_size - pos < file.dwSize + sizeof(GUID) + sizeof(DWORD)) return FALSE;
+    memcpy( &file, list + pos, file.dwSize );
+    pos += file.dwSize;
+
+    memcpy( &info->GuidEffect, list + pos, sizeof(GUID) );
+    pos += sizeof(GUID) + sizeof(DWORD);
+
+    present[0] = !!file.rgdwAxes;
+    present[1] = !!file.rglDirection;
+    present[2] = !!file.lpEnvelope;
+    present[3] = !!file.lpvTypeSpecificParams;
+    for (i = 0; i < ARRAY_SIZE(chunks); i++)
+    {
+        chunks[i] = NULL;
+        sizes[i] = 0;
+        if (!present[i]) continue;
+        if (!read_riff_chunk( list, list_size, &pos, &id, &chunks[i], &sizes[i] )) return FALSE;
+        if (memcmp( id, "data", 4 )) return FALSE;
+    }
+
+    if (present[0] && file.cAxes > sizes[0] / sizeof(DWORD)) return FALSE;
+    if (present[1] && file.cAxes > sizes[1] / sizeof(LONG)) return FALSE;
+    if (present[2] && sizes[2] < sizeof(DIENVELOPE)) return FALSE;
+    if (file.cbTypeSpecificParams && !present[3]) return FALSE;
+    if (present[3] && file.cbTypeSpecificParams > sizes[3]) return FALSE;
+
+    memcpy( info->szFriendlyName, list, FILE_EFFECT_NAME_SIZE );
+    info->szFriendlyName[FILE_EFFECT_NAME_SIZE - 1] = 0;
+
+    effect->dwSize = file.dwSize == sizeof(file) ? sizeof(DIEFFECT_DX6) : sizeof(DIEFFECT_DX5);
+    effect->dwFlags = file.dwFlags;
+    effect->dwDuration = file.dwDuration;
+    effect->dwSamplePeriod = file.dwSamplePeriod;
+    effect->dwGain = file.dwGain;
+    effect->dwTriggerButton = file.dwTriggerButton;
+    effect->dwTriggerRepeatInterval = file.dwTriggerRepeatInterval;
+    effect->cAxes = file.cAxes;
+    effect->rgdwAxes = NULL;
+    effect->rglDirection = NULL;
+    effect->lpEnvelope = NULL;
+    effect->cbTypeSpecificParams = file.cbTypeSpecificParams;
+    effect->lpvTypeSpecificParams = NULL;
+    effect->dwStartDelay = file.dwStartDelay;
+
+    if (present[0] && file.cAxes)
+    {
+        effect->rgdwAxes = (DWORD *)params;
+        memcpy( params, chunks[0], file.cAxes * sizeof(DWORD) );
+        params += file.cAxes * sizeof(DWORD);
+    }
+    if (present[1] && file.cAxes)
+    {
+        effect->rglDirection = (LONG *)params;
+        memcpy( params, chunks[1], file.cAxes * sizeof(LONG) );
+        params += file.cAxes * sizeof(LONG);
+    }
+    if (present[2])
+    {
+        memcpy( envelope, chunks[2], sizeof(*envelope) );
+        envelope->dwSize = sizeof(*envelope);
+        effect->lpEnvelope = envelope;
+    }
+    if (file.cbTypeSpecificParams)
+    {
+        effect->lpvTypeSpecificParams = params;
+        memcpy( params, chunks[3], file.cbTypeSpecificParams );
+    }
+
+    return TRUE;
+}
+
 static HRESULT WINAPI dinput_device_EnumEffectsInFile( IDirectInputDevice8W *iface, const WCHAR *filename,
                                                        LPDIENUMEFFECTSINFILECALLBACK callback,
                                                        void *context, DWORD flags )
 {
-    FIXME( "iface %p, filename %s, callback %p, context %p, flags %#lx stub!\n", iface,
+    DIFILEEFFECT info = {.dwSize = sizeof(DIFILEEFFECT)};
+    DIENVELOPE envelope;
+    DIEFFECT effect;
+    DWORD size, riff_size, pos, list_size, read;
+    const BYTE *id, *list;
+    BYTE *data, *params;
+    LARGE_INTEGER file_size;
+    HRESULT hr = DI_OK;
+    HANDLE file;
+
+    TRACE( "iface %p, filename %s, callback %p, context %p, flags %#lx.\n", iface,
            debugstr_w(filename), callback, context, flags );
-    return DI_OK;
+
+    if (!filename || !callback) return DIERR_INVALIDPARAM;
+    if (flags & DIFEF_MODIFYIFNEEDED) FIXME( "DIFEF_MODIFYIFNEEDED not implemented.\n" );
+
+    file = CreateFileW( filename, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL );
+    if (file == INVALID_HANDLE_VALUE) return HRESULT_FROM_WIN32( GetLastError() );
+
+    if (!GetFileSizeEx( file, &file_size )) hr = HRESULT_FROM_WIN32( GetLastError() );
+    else if (!file_size.QuadPart || file_size.QuadPart > MAXDWORD) hr = DIERR_INVALIDPARAM;
+    if (FAILED(hr))
+    {
+        CloseHandle( file );
+        return hr;
+    }
+    size = file_size.LowPart;
+
+    data = malloc( size );
+    params = malloc( size );
+    if (!data || !params) hr = DIERR_OUTOFMEMORY;
+    else if (!ReadFile( file, data, size, &read, NULL )) hr = HRESULT_FROM_WIN32( GetLastError() );
+    else if (read != size) hr = DIERR_INVALIDPARAM;
+    CloseHandle( file );
+    if (FAILED(hr)) goto done;
+
+    if (size < 12 || memcmp( data, "RIFF", 4 ) || memcmp( data + 8, "FORC", 4 ))
+    {
+        WARN( "%s is not an effect file.\n", debugstr_w(filename) );
+        hr = DIERR_INVALIDPARAM;
+        goto done;
+    }
+
+    /* some files have a RIFF size of 0, so it only limits the walk when it is set */
+    memcpy( &riff_size, data + 4, sizeof(riff_size) );
+    if (riff_size >= 4 && riff_size < size - 8) size = riff_size + 8;
+
+    pos = 12;
+    if (size - pos >= 4 && memcmp( data + pos, "LIST", 4 ))
+    {
+        if (size - pos < sizeof(GUID))
+        {
+            hr = DIERR_INVALIDPARAM;
+            goto done;
+        }
+        pos += sizeof(GUID);
+    }
+
+    while (pos < size)
+    {
+        if (!read_riff_chunk( data, size, &pos, &id, &list, &list_size ))
+        {
+            WARN( "%s is truncated at offset %#lx.\n", debugstr_w(filename), pos );
+            hr = DIERR_INVALIDPARAM;
+            break;
+        }
+        if (memcmp( id, "LIST", 4 ) || list_size < 4 || memcmp( list, "efct", 4 )) continue;
+
+        if (!parse_file_effect( list + 4, list_size - 4, &info, &effect, &envelope, params ))
+        {
+            WARN( "%s has an invalid effect at offset %#x.\n", debugstr_w(filename), (UINT)(id - data) );
+            continue;
+        }
+        info.lpDiEffect = &effect;
+
+        TRACE( "effect %s, guid %s, flags %#lx, axes %lu, type-specific size %lu.\n",
+               debugstr_a(info.szFriendlyName), debugstr_guid(&info.GuidEffect), effect.dwFlags,
+               effect.cAxes, effect.cbTypeSpecificParams );
+
+        if (!(flags & DIFEF_INCLUDENONSTANDARD) && !is_standard_effect( &info.GuidEffect )) continue;
+        if (IsEqualGUID( &info.GuidEffect, &GUID_CustomForce ))
+        {
+            /* DICUSTOMFORCE points to its samples, and how a file stores them is unknown. */
+            FIXME( "Skipping custom force effect %s.\n", debugstr_a(info.szFriendlyName) );
+            continue;
+        }
+        if (callback( &info, context ) != DIENUM_CONTINUE) break;
+    }
+
+done:
+    free( params );
+    free( data );
+    return hr;
 }
 
 static HRESULT WINAPI dinput_device_WriteEffectToFile( IDirectInputDevice8W *iface, const WCHAR *filename,
