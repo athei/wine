@@ -316,6 +316,7 @@ const unixlib_entry_t __wine_unix_call_funcs[] =
     iohid_bus_init,
     iohid_bus_wait,
     iohid_bus_stop,
+    iohid_device_has_pid,
     mouse_device_create,
     keyboard_device_create,
     unix_device_remove,

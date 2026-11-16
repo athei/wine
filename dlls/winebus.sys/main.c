@@ -579,6 +579,13 @@ static BOOL is_hidraw_enabled(WORD vid, WORD pid, const USAGE_AND_PAGE *usages, 
         break;
     }
 
+    /* through SDL, a force feedback joystick on macOS has no effects; its own PID reports work */
+    if (!prefer_hidraw)
+    {
+        struct iohid_device_has_pid_params params = {.vid = vid, .pid = pid};
+        if (!winebus_call(iohid_has_pid, &params) && params.has_pid) prefer_hidraw = TRUE;
+    }
+
     RtlInitUnicodeString(&str, L"EnableHidraw");
     if (!NtQueryValueKey(driver_key, &str, KeyValuePartialInformation, info,
                          sizeof(buffer) - sizeof(WCHAR), &size))

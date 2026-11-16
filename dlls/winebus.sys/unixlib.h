@@ -137,6 +137,13 @@ struct device_report_params
     IO_STATUS_BLOCK *io;
 };
 
+struct iohid_device_has_pid_params
+{
+    UINT vid;
+    UINT pid;
+    BOOL has_pid;
+};
+
 enum unix_funcs
 {
     sdl_init,
@@ -148,6 +155,7 @@ enum unix_funcs
     iohid_init,
     iohid_wait,
     iohid_stop,
+    iohid_has_pid,
     mouse_create,
     keyboard_create,
     device_remove,
