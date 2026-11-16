@@ -1881,14 +1881,14 @@ NTSTATUS WINAPI NtDuplicateObject( HANDLE source_process, HANDLE source, HANDLE 
         return result.dup_handle.status;
     }
 
-    /* hold fd_cache_mutex to prevent the fd from being added again between the
-     * call to remove_fd_from_cache and close_handle */
-    server_enter_uninterrupted_section( &fd_cache_mutex, &sigset );
-
-    /* always remove the cached fd; if the server request fails we'll just
-     * retrieve it again */
     if (options & DUPLICATE_CLOSE_SOURCE)
     {
+        /* hold fd_cache_mutex to prevent the fd from being added again between the
+         * call to remove_fd_from_cache and close_handle */
+        server_enter_uninterrupted_section( &fd_cache_mutex, &sigset );
+
+        /* always remove the cached fd; if the server request fails we'll just
+         * retrieve it again */
         fd = remove_fd_from_cache( source );
         close_inproc_sync( source );
     }
@@ -1908,7 +1908,7 @@ NTSTATUS WINAPI NtDuplicateObject( HANDLE source_process, HANDLE source, HANDLE 
     }
     SERVER_END_REQ;
 
-    server_leave_uninterrupted_section( &fd_cache_mutex, &sigset );
+    if (options & DUPLICATE_CLOSE_SOURCE) server_leave_uninterrupted_section( &fd_cache_mutex, &sigset );
 
     if (fd != -1) close( fd );
     return ret;
