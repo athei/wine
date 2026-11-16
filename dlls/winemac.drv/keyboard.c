@@ -1262,6 +1262,14 @@ INT macdrv_GetKeyNameText(LONG lparam, LPWSTR buffer, INT size)
         }
     }
 
+    if (scan && keyc == ARRAY_SIZE(thread_data->keyc2scan))
+    {
+        /* No Mac key has this scan code, such as Num Lock or Pause; the
+           layout still names it, as on Windows. */
+        TRACE("no key code for lparam 0x%08x\n", (unsigned int)lparam);
+        return -1;
+    }
+
     WARN("found no name for lparam 0x%08x\n", (unsigned int)lparam);
     return 0;
 }
@@ -1340,7 +1348,8 @@ UINT macdrv_MapVirtualKeyEx(UINT wCode, UINT wMapType, HKL hkl)
 
         case MAPVK_VSC_TO_VK: /* scan-code to vkey-code */
         case MAPVK_VSC_TO_VK_EX:
-            /* scan -> keycode -> vkey */
+            /* scan -> keycode -> vkey; scan code 0 is no key */
+            if (!(wCode & 0xFF)) break;
             for (keyc = 0; keyc < ARRAY_SIZE(thread_data->keyc2vkey); keyc++)
                 if ((thread_data->keyc2scan[keyc] & 0xFF) == (wCode & 0xFF))
                 {
@@ -1378,7 +1387,9 @@ UINT macdrv_MapVirtualKeyEx(UINT wCode, UINT wMapType, HKL hkl)
             UniCharCount len;
             BOOL deadKey = FALSE;
 
-            if ((VK_PRIOR <= wCode && wCode <= VK_HELP) ||
+            /* vkey 0 is no key, though the Mac keys without a vkey map to it */
+            if (!wCode ||
+                (VK_PRIOR <= wCode && wCode <= VK_HELP) ||
                 (VK_F1 <= wCode && wCode <= VK_F24))
                 break;
 
