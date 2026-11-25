@@ -405,6 +405,26 @@ int get_compat_force_nx(void)
     return compat_force_nx;
 }
 
+/* Whether the unix process stays after the Windows process exits while other
+ * user processes run, chosen by compatdb.so: -1 unset, 0 off, 1 on. Only 1
+ * changes anything. */
+static int compat_linger_at_exit = -1;
+
+/***********************************************************************
+ *           set_compat_linger_at_exit  (ntdll.so)
+ *
+ * Called by compatdb.so.
+ */
+DECLSPEC_EXPORT void set_compat_linger_at_exit( int value )
+{
+    compat_linger_at_exit = value;
+}
+
+int get_compat_linger_at_exit(void)
+{
+    return compat_linger_at_exit;
+}
+
 /* Which OpenGL the Mac driver uses, chosen by compatdb.so: -1 unset, 0 Apple's
  * OpenGL, 1 Mesa's EGL. Unset is Apple's OpenGL, as upstream. */
 static int compat_opengl = -1;

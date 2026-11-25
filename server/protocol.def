@@ -1232,6 +1232,14 @@ typedef volatile struct
 @END
 
 
+/* Keep the unix process of the terminating current process until no other user process runs */
+@REQ(linger_at_exit)
+    int          fd;           /* write end of a pipe the server closes when the linger ends */
+@REPLY
+    int          linger;       /* does the process linger? */
+@END
+
+
 /* Terminate a thread */
 @REQ(terminate_thread)
     obj_handle_t handle;       /* thread handle to terminate */

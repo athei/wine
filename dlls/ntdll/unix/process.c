@@ -988,8 +988,13 @@ NTSTATUS WINAPI NtTerminateProcess( HANDLE handle, LONG exit_code )
     SERVER_END_REQ;
     if (self)
     {
+        if (!process_exiting && !handle)
+        {
+            process_exiting = TRUE;
+            return ret;
+        }
+        server_linger_at_exit();
         if (process_exiting) exit_process( exit_code );
-        else if (!handle) process_exiting = TRUE;
         else abort_process( exit_code );
     }
     return ret;

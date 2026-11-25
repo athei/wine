@@ -1157,6 +1157,29 @@ static int remove_fd_from_cache( HANDLE handle )
 
 
 /***********************************************************************
+ *           close_cached_fds
+ *
+ * Close every unix fd of the cache, for a process whose Windows threads are
+ * all gone, so that its sockets and files do not outlive it.
+ */
+static void close_cached_fds(void)
+{
+    union fd_cache_entry cache;
+    unsigned int entry, idx;
+
+    for (entry = 0; entry < FD_CACHE_ENTRIES; entry++)
+    {
+        if (!fd_cache[entry]) continue;
+        for (idx = 0; idx < FD_CACHE_BLOCK_SIZE; idx++)
+        {
+            cache.data = interlocked_xchg64( &fd_cache[entry][idx].data, 0 );
+            if (cache.s.fd && cache.s.type != FD_TYPE_INVALID) close( cache.s.fd - 1 );
+        }
+    }
+}
+
+
+/***********************************************************************
  *           server_get_unix_fd
  *
  * The returned unix_fd should be closed iff needs_close is non-zero.
@@ -1604,6 +1627,51 @@ void process_exit_wrapper( int status )
 {
     close( fd_socket );
     exit( status );
+}
+
+
+/***********************************************************************
+ *           server_linger_at_exit
+ *
+ * Called by the last thread of a terminating process, when compatdb.so asked
+ * for it. While other user processes run, the Windows process ends here: the
+ * server sees fd_socket close and finishes it as on any exit, its handle
+ * included. The unix process stays until the server closes its end of the
+ * pipe, when no other user process runs any more, so that a launcher that
+ * started a game and exited does not end the macOS app the game runs under.
+ * The fds of the fd cache are closed before the wait, so that the sockets
+ * and files of the Windows process end with it; no Windows thread is left to
+ * use them. Other fds stay, since the process's unix threads, such as the
+ * Cocoa main thread, still run.
+ */
+void server_linger_at_exit(void)
+{
+    int fds[2], linger = 0;
+    ssize_t ret;
+    char c;
+
+    if (get_compat_linger_at_exit() != 1) return;
+    if (server_pipe( fds ) == -1) return;
+    wine_server_send_fd( fds[1] );
+    SERVER_START_REQ( linger_at_exit )
+    {
+        req->fd = fds[1];
+        if (!wine_server_call( req )) linger = reply->linger;
+    }
+    SERVER_END_REQ;
+    close( fds[1] );
+    if (linger)
+    {
+        close( fd_socket );
+        fd_socket = -1;
+        close_cached_fds();
+        for (;;)
+        {
+            ret = read( fds[0], &c, 1 );
+            if (!ret || (ret == -1 && errno != EINTR)) break;
+        }
+    }
+    close( fds[0] );
 }
 
 

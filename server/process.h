@@ -65,6 +65,9 @@ struct process
     unsigned int         is_system:1;     /* is it a system process? */
     unsigned int         debug_children:1;/* also debug all child processes */
     unsigned int         is_terminating:1;/* is process terminating? */
+    unsigned int         linger:1;        /* does the unix process outlive the Windows one? */
+    int                  linger_fd;       /* pipe end closed when the linger ends, or -1 */
+    struct list          linger_entry;    /* entry in the list of lingering processes */
     data_size_t          imagelen;        /* length of image path in bytes */
     WCHAR               *image;           /* main exe image full path */
     struct job          *job;             /* job object associated with this process */

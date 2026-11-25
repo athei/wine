@@ -184,6 +184,16 @@ static void dump_terminate_process_reply( const struct terminate_process_reply *
     fprintf( stderr, ", exit_code=%d", req->exit_code );
 }
 
+static void dump_linger_at_exit_request( const struct linger_at_exit_request *req )
+{
+    fprintf( stderr, " fd=%d", req->fd );
+}
+
+static void dump_linger_at_exit_reply( const struct linger_at_exit_reply *req )
+{
+    fprintf( stderr, " linger=%d", req->linger );
+}
+
 static void dump_terminate_thread_request( const struct terminate_thread_request *req )
 {
     fprintf( stderr, " handle=%04x", req->handle );
@@ -3591,6 +3601,7 @@ static const dump_func req_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_init_first_thread_request,
     (dump_func)dump_init_thread_request,
     (dump_func)dump_terminate_process_request,
+    (dump_func)dump_linger_at_exit_request,
     (dump_func)dump_terminate_thread_request,
     (dump_func)dump_get_process_info_request,
     (dump_func)dump_get_process_debug_info_request,
@@ -3908,6 +3919,7 @@ static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_init_first_thread_reply,
     (dump_func)dump_init_thread_reply,
     (dump_func)dump_terminate_process_reply,
+    (dump_func)dump_linger_at_exit_reply,
     (dump_func)dump_terminate_thread_reply,
     (dump_func)dump_get_process_info_reply,
     (dump_func)dump_get_process_debug_info_reply,
@@ -4225,6 +4237,7 @@ static const char * const req_names[REQ_NB_REQUESTS] =
     "init_first_thread",
     "init_thread",
     "terminate_process",
+    "linger_at_exit",
     "terminate_thread",
     "get_process_info",
     "get_process_debug_info",

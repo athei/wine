@@ -246,6 +246,7 @@ extern void *create_startup_info( const UNICODE_STRING *nt_image, ULONG process_
 extern char *get_alternate_wineloader( WORD machine );
 extern int get_compat_large_address_aware(void);
 extern int get_compat_force_nx(void);
+extern int get_compat_linger_at_exit(void);
 extern NTSTATUS exec_wineloader( char **argv, int socketfd, const struct pe_image_info *pe_info );
 extern NTSTATUS load_builtin( struct pe_mapping_info *pe_mapping, USHORT machine,
                               SECTION_IMAGE_INFORMATION *info, void **module, SIZE_T *size,
@@ -271,6 +272,7 @@ extern int server_get_unix_fd( HANDLE handle, unsigned int wanted_access, int *u
                                int *needs_close, enum server_fd_type *type, unsigned int *options );
 extern int wine_server_receive_fd( obj_handle_t *handle );
 extern void process_exit_wrapper( int status ) DECLSPEC_NORETURN;
+extern void server_linger_at_exit(void);
 extern void server_init_process( struct thread_data *data );
 extern void server_init_process_done(void);
 extern void server_init_thread( struct thread_data *data );

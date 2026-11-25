@@ -68,6 +68,7 @@
 /* process object */
 
 static struct list process_list = LIST_INIT(process_list);
+static struct list linger_list = LIST_INIT(linger_list);
 static int running_processes, user_processes;
 static struct event *shutdown_event;           /* signaled when shutdown starts */
 static struct timeout_user *shutdown_timeout;  /* timeout for server shutdown */
@@ -550,8 +551,9 @@ void shutdown_master_socket(void)
 static void process_died( struct process *process )
 {
     if (debug_level) fprintf( stderr, "%04x: *process killed*\n", process->id );
-    /* only now can no thread of it touch its msync objects any more */
-    msync_process_exited( process->id );
+    /* only now can no thread of it touch its msync objects any more; a
+     * lingering unix process can, until check_lingering_processes ends it */
+    if (process->linger_fd == -1) msync_process_exited( process->id );
     if (!process->is_system)
     {
         if (!--user_processes && !shutdown_stage && master_socket_timeout != TIMEOUT_INFINITE)
@@ -585,10 +587,59 @@ static void process_sigkill( void *private )
 static void start_sigkill_timer( struct process *process )
 {
     grab_object( process );
-    if (process->unix_pid != -1)
+    /* a lingering unix process stays on purpose and exits by itself */
+    if (process->unix_pid != -1 && !process->linger)
         process->sigkill_timeout = add_timeout_user( -process->sigkill_delay, process_sigkill, process );
     else
         process_died( process );
+}
+
+/* whether the process owns the window of its desktop, as explorer does */
+static int is_desktop_owner( struct process *process )
+{
+    unsigned int error = get_error();
+    struct desktop *desktop;
+    int ret = 0;
+
+    if (!process->desktop) return 0;
+    if ((desktop = get_desktop_obj( process, process->desktop, 0 )))
+    {
+        ret = get_top_window_owner( desktop ) == process;
+        release_object( desktop );
+    }
+    set_error( error );
+    return ret;
+}
+
+/* whether a running user process other than 'process' keeps a lingering
+ * process alive; the owner of a desktop window and lingering processes do not */
+static int has_linger_holders( struct process *process )
+{
+    struct process *other;
+
+    LIST_FOR_EACH_ENTRY( other, &process_list, struct process, entry )
+    {
+        if (other == process || other->is_system || other->linger) continue;
+        if (!is_desktop_owner( other )) return 1;
+    }
+    return 0;
+}
+
+/* end the linger of every lingering process once nothing holds it */
+static void check_lingering_processes(void)
+{
+    struct process *process, *next;
+
+    if (list_empty( &linger_list ) || has_linger_holders( NULL )) return;
+    LIST_FOR_EACH_ENTRY_SAFE( process, next, &linger_list, struct process, linger_entry )
+    {
+        close( process->linger_fd );
+        process->linger_fd = -1;
+        /* process_died left its msync objects alone; the list kept its id */
+        if (!process->running_threads) msync_process_exited( process->id );
+        list_remove( &process->linger_entry );
+        release_object( process );
+    }
 }
 
 /* create a new process */
@@ -626,6 +677,8 @@ struct process *create_process( int fd, struct process *parent, unsigned int fla
     process->is_system       = 0;
     process->debug_children  = 1;
     process->is_terminating  = 0;
+    process->linger          = 0;
+    process->linger_fd       = -1;
     process->imagelen        = 0;
     process->image           = NULL;
     process->job             = NULL;
@@ -646,6 +699,7 @@ struct process *create_process( int fd, struct process *parent, unsigned int fla
     process->rawinput_kbd    = NULL;
     memset( &process->image_info, 0, sizeof(process->image_info) );
     list_init( &process->rawinput_entry );
+    list_init( &process->linger_entry );
     list_init( &process->kernel_object );
     list_init( &process->thread_list );
     list_init( &process->locks );
@@ -949,6 +1003,7 @@ static void process_killed( struct process *process )
     release_job_process( process );
     start_sigkill_timer( process );
     signal_sync( process->sync );
+    check_lingering_processes();
 }
 
 /* add a thread to a process running threads list */
@@ -1485,6 +1540,29 @@ DECL_HANDLER(terminate_process)
     release_object( process );
 }
 
+/* keep the unix process of a terminating process until no other user process runs */
+DECL_HANDLER(linger_at_exit)
+{
+    struct process *process = current->process;
+    int fd = thread_get_inflight_fd( current, req->fd );
+
+    if (fd == -1)
+    {
+        set_error( STATUS_INVALID_HANDLE );
+        return;
+    }
+    if (!process->is_terminating || process->linger || !has_linger_holders( process ))
+    {
+        close( fd );
+        return;
+    }
+    process->linger = 1;
+    process->linger_fd = fd;
+    list_add_tail( &linger_list, &process->linger_entry );
+    grab_object( process );
+    reply->linger = 1;
+}
+
 /* fetch information about a process */
 DECL_HANDLER(get_process_info)
 {
@@ -1803,6 +1881,7 @@ DECL_HANDLER(make_process_system)
         process->is_system = 1;
         if (!--user_processes && !shutdown_stage && master_socket_timeout != TIMEOUT_INFINITE)
             shutdown_timeout = add_timeout_user( master_socket_timeout, server_shutdown_timeout, NULL );
+        check_lingering_processes();
     }
     release_object( process );
 }

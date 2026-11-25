@@ -1268,6 +1268,20 @@ struct terminate_process_reply
 
 
 
+struct linger_at_exit_request
+{
+    struct request_header __header;
+    int          fd;
+};
+struct linger_at_exit_reply
+{
+    struct reply_header __header;
+    int          linger;
+    char __pad_12[4];
+};
+
+
+
 struct terminate_thread_request
 {
     struct request_header __header;
@@ -6329,6 +6343,7 @@ enum request
     REQ_init_first_thread,
     REQ_init_thread,
     REQ_terminate_process,
+    REQ_linger_at_exit,
     REQ_terminate_thread,
     REQ_get_process_info,
     REQ_get_process_debug_info,
@@ -6649,6 +6664,7 @@ union generic_request
     struct init_first_thread_request init_first_thread_request;
     struct init_thread_request init_thread_request;
     struct terminate_process_request terminate_process_request;
+    struct linger_at_exit_request linger_at_exit_request;
     struct terminate_thread_request terminate_thread_request;
     struct get_process_info_request get_process_info_request;
     struct get_process_debug_info_request get_process_debug_info_request;
@@ -6967,6 +6983,7 @@ union generic_reply
     struct init_first_thread_reply init_first_thread_reply;
     struct init_thread_reply init_thread_reply;
     struct terminate_process_reply terminate_process_reply;
+    struct linger_at_exit_reply linger_at_exit_reply;
     struct terminate_thread_reply terminate_thread_reply;
     struct get_process_info_reply get_process_info_reply;
     struct get_process_debug_info_reply get_process_debug_info_reply;
@@ -7274,6 +7291,6 @@ union generic_reply
     struct alpc_create_port_reply alpc_create_port_reply;
 };
 
-#define SERVER_PROTOCOL_VERSION 973
+#define SERVER_PROTOCOL_VERSION 974
 
 #endif /* __WINE_WINE_SERVER_PROTOCOL_H */
