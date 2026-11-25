@@ -143,7 +143,12 @@ static NSString* WineLocalizedString(unsigned int stringID)
             @{
                 @"NSQuotedKeystrokeBinding" : @"",
                     @"NSRepeatCountBinding" : @"",
-                @"ApplePressAndHoldEnabled" : @NO
+                @"ApplePressAndHoldEnabled" : @NO,
+                /* AppKit sets up AutoFill for the content view's input
+                   context, which starts a
+                   com.apple.SafariPlatformSupport.Helper process for every
+                   process that shows a window. */
+                @"NSEnableTextInputContextBasedAutoFill" : @NO
             };
 
             [[NSUserDefaults standardUserDefaults] registerDefaults:defaults];
