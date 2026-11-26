@@ -686,22 +686,8 @@ char *get_alternate_wineloader( WORD machine )
 }
 
 
-static void preloader_exec( char **argv )
+static void exec_loader_image( const char *path, char **argv )
 {
-#ifdef HAVE_WINE_PRELOADER
-    asprintf( &argv[0], "%s-preloader", argv[1] );
-#ifdef __APPLE__
-    {
-        posix_spawnattr_t attr;
-        posix_spawnattr_init( &attr );
-        posix_spawnattr_setflags( &attr, POSIX_SPAWN_SETEXEC | _POSIX_SPAWN_DISABLE_ASLR );
-        posix_spawn( NULL, argv[0], NULL, &attr, argv, *_NSGetEnviron() );
-        posix_spawnattr_destroy( &attr );
-    }
-#endif
-    execv( argv[0], argv );
-    free( argv[0] );
-#endif
 #if defined(__APPLE__) && defined(__aarch64__)
     /* The loader execs itself again to get 4K pages (see loader/main.c), which a plain
      * exec drops. When this process has them, it runs from an entitled loader, and the
@@ -718,14 +704,33 @@ static void preloader_exec( char **argv )
         {
             if (!(err = posix_spawnattr_setflags( &attr, POSIX_SPAWN_SETEXEC )) &&
                 !(err = posix_spawnattr_set_4k_page_size_np( &attr )))
-                err = posix_spawn( NULL, argv[1], NULL, &attr, argv + 1, environ );
+                err = posix_spawn( NULL, path, NULL, &attr, argv, environ );
             posix_spawnattr_destroy( &attr );
         }
         errno = err;
         return;
     }
 #endif
-    execv( argv[1], argv + 1 );
+    execv( path, argv );
+}
+
+static void preloader_exec( char **argv )
+{
+#ifdef HAVE_WINE_PRELOADER
+    asprintf( &argv[0], "%s-preloader", argv[1] );
+#ifdef __APPLE__
+    {
+        posix_spawnattr_t attr;
+        posix_spawnattr_init( &attr );
+        posix_spawnattr_setflags( &attr, POSIX_SPAWN_SETEXEC | _POSIX_SPAWN_DISABLE_ASLR );
+        posix_spawn( NULL, argv[0], NULL, &attr, argv, *_NSGetEnviron() );
+        posix_spawnattr_destroy( &attr );
+    }
+#endif
+    execv( argv[0], argv );
+    free( argv[0] );
+#endif
+    exec_loader_image( argv[1], argv + 1 );
 }
 
 #if defined(__APPLE__) && defined(__aarch64__)
@@ -737,33 +742,31 @@ const char *ntdll_get_named_loader_title(void)
     return named_loader_title;
 }
 
-static BOOL get_display_name( const WCHAR *image, size_t image_len, const WCHAR *env, size_t env_len,
-                              char *title, size_t capacity )
+static char *named_loader_for_title( const char *title, size_t len, size_t capacity, int *lease )
 {
-    size_t len, i;
+    char temp[PATH_MAX];
+    size_t i;
+    char *path;
 
-    if (!resolve_display_name || !image_len || !env_len || build_dir) return FALSE;
-    len = resolve_display_name( image, image_len, env, env_len, title, capacity );
-    if (!len || len >= capacity || title[0] == '.' || title[len]) return FALSE;
+    if (!len || len >= capacity || title[0] == '.' || title[len]) return NULL;
     for (i = 0; i < len; ++i)
-        if ((unsigned char)title[i] < 32 || title[i] == 127 || title[i] == '/') return FALSE;
-    return TRUE;
+        if ((unsigned char)title[i] < 32 || title[i] == 127 || title[i] == '/') return NULL;
+    if (!(len = confstr( _CS_DARWIN_USER_CACHE_DIR, temp, sizeof(temp) )) || len > sizeof(temp)) return NULL;
+    path = prepare_named_loader( temp, ntdll_dir, title, lease );
+    if (!path) WARN( "could not prepare named loader for %s\n", debugstr_a(title) );
+    return path;
 }
 #endif
 
 char *get_compat_named_loader( const UNICODE_STRING *image, const WCHAR *env, size_t env_len, int *lease )
 {
 #if defined(__APPLE__) && defined(__aarch64__)
-    char title[241], temp[PATH_MAX];
+    char title[241];
     size_t len;
-    char *path;
 
-    if (!get_display_name( image->Buffer, image->Length / sizeof(WCHAR), env, env_len, title, sizeof(title) ))
-        return NULL;
-    if (!(len = confstr( _CS_DARWIN_USER_CACHE_DIR, temp, sizeof(temp) )) || len > sizeof(temp)) return NULL;
-    path = prepare_named_loader( temp, ntdll_dir, title, lease );
-    if (!path) WARN( "could not prepare named loader for %s\n", debugstr_a(title) );
-    return path;
+    if (!resolve_display_name || !image->Length || !env_len || build_dir) return NULL;
+    len = resolve_display_name( image->Buffer, image->Length / sizeof(WCHAR), env, env_len, title, sizeof(title) );
+    return named_loader_for_title( title, len, sizeof(title), lease );
 #else
     return NULL;
 #endif
@@ -2153,17 +2156,35 @@ static ULONG_PTR get_image_address(void)
 DECLSPEC_EXPORT const int ntdll_defer_compatdb_apply = 1;
 static void *early_compatdb;
 
-BOOL initial_image_needs_named_loader( const WCHAR *image, const WCHAR *env, size_t env_len )
+/* A Unix launch has argv and the inherited Unix environment only. No PEB,
+ * DOS path conversion API or wineserver connection exists at this point. */
+static void exec_named_initial_loader( char **argv )
 {
-    char *name, title[241];
+    size_t (*resolve)( const char *, const char *, const char *, char *, size_t );
+    char *name, title[241], **var, *appid = NULL;
+    size_t len;
+    int lease = -1;
 
-    /* Never run a legacy compatdb.so initializer before the PEB is complete. */
-    if (build_dir || asprintf( &name, "%s/compatdb-before-image.so", ntdll_dir ) == -1) return FALSE;
+    if (build_dir || asprintf( &name, "%s/compatdb-before-image.so", ntdll_dir ) == -1) return;
     early_compatdb = dlopen( name, RTLD_LOCAL | RTLD_LAZY );
     free( name );
-    if (!early_compatdb) return FALSE;
-    resolve_display_name = dlsym( early_compatdb, "compatdb_resolve_display_name" );
-    return get_display_name( image, wcslen(image), env, env_len, title, sizeof(title) );
+    if (!early_compatdb || !(resolve = dlsym( early_compatdb, "compatdb_resolve_initial_display_name" ))) return;
+    for (var = environ; *var; ++var)
+        if (!strncasecmp( *var, "SteamAppId=", sizeof("SteamAppId=") - 1 ))
+        {
+            appid = *var + sizeof("SteamAppId=") - 1;
+            break;
+        }
+    len = resolve( argv[1], config_dir, appid, title, sizeof(title) );
+    if (!(name = named_loader_for_title( title, len, sizeof(title), &lease ))) return;
+    if (inherit_named_loader( lease, name, ntdll_dir ))
+    {
+        exec_loader_image( name, argv );
+        WARN( "could not exec named loader %s (%d); continuing with default loader\n", debugstr_a(name), errno );
+        unsetenv( NAMED_LOADER_LEASE_ENV );
+    }
+    close( lease );
+    free( name );
 }
 #endif
 
@@ -2458,14 +2479,23 @@ static void check_command_line( int argc, char *argv[] )
  */
 DECLSPEC_EXPORT void __wine_main( int argc, char *argv[] )
 {
+    BOOL check_cmdline = !getenv( "WINELOADERNOEXEC" ) || argc <= 1;
+#if defined(__APPLE__) && defined(__aarch64__)
+    /* Never retry optional naming in a copy with an unusable inherited lease. */
+    BOOL initial = !getenv( NAMED_LOADER_LEASE_ENV ) && !getenv( "WINESERVERSOCKET" );
+#endif
+
     main_argc = argc;
     main_argv = argv;
 #if defined(__APPLE__) && defined(__aarch64__)
-    named_loader_title = adopt_named_loader();
+    if ((named_loader_title = adopt_named_loader())) check_cmdline = FALSE;
 #endif
 
     init_paths();
-    if (!getenv( "WINELOADERNOEXEC" ) || argc <= 1) check_command_line( argc, argv );
+    if (check_cmdline) check_command_line( argc, argv );
+#if defined(__APPLE__) && defined(__aarch64__)
+    if (initial && argc > 1) exec_named_initial_loader( argv );
+#endif
     unsetenv( "WINELOADERNOEXEC" );
 
 #ifdef RLIMIT_NOFILE
