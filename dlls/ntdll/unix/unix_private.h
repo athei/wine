@@ -247,13 +247,18 @@ extern char *get_alternate_wineloader( WORD machine );
 extern int get_compat_large_address_aware(void);
 extern int get_compat_force_nx(void);
 extern int get_compat_linger_at_exit(void);
-extern NTSTATUS exec_wineloader( char **argv, int socketfd, const struct pe_image_info *pe_info );
+extern char *get_compat_named_loader( const UNICODE_STRING *image, const WCHAR *env, size_t env_len, int *lease );
+extern NTSTATUS exec_wineloader( char **argv, int socketfd, const struct pe_image_info *pe_info,
+                                 char *named_loader, int lease );
 extern NTSTATUS load_builtin( struct pe_mapping_info *pe_mapping, USHORT machine,
                               SECTION_IMAGE_INFORMATION *info, void **module, SIZE_T *size,
                               ULONG_PTR limit_low, ULONG_PTR limit_high, off_t offset );
 extern NTSTATUS load_unixlib_by_name( const UNICODE_STRING *nt_name, void **handle_ret );
 extern BOOL is_system_dir_path( const UNICODE_STRING *path, WORD *machine );
 extern NTSTATUS load_main_exe( UNICODE_STRING *nt_name, USHORT load_machine );
+#if defined(__APPLE__) && defined(__aarch64__)
+extern BOOL initial_image_needs_named_loader( const WCHAR *image, const WCHAR *env, size_t env_len );
+#endif
 extern NTSTATUS load_start_exe( UNICODE_STRING *nt_name );
 extern ULONG_PTR redirect_arm64ec_rva( void *module, ULONG_PTR rva, const IMAGE_ARM64EC_METADATA *metadata );
 extern void start_server( BOOL debug );

@@ -70,6 +70,9 @@
 # include <mach/mach_error.h>
 # include <mach-o/getsect.h>
 # include <crt_externs.h>
+# ifdef __aarch64__
+#  include "named_loader.h"
+# endif
 # ifndef _POSIX_SPAWN_DISABLE_ASLR
 #  define _POSIX_SPAWN_DISABLE_ASLR 0x0100
 # endif
@@ -725,14 +728,59 @@ static void preloader_exec( char **argv )
     execv( argv[1], argv + 1 );
 }
 
+#if defined(__APPLE__) && defined(__aarch64__)
+static size_t (*resolve_display_name)( const WCHAR *, size_t, const WCHAR *, size_t, char *, size_t );
+
+static BOOL get_display_name( const WCHAR *image, size_t image_len, const WCHAR *env, size_t env_len,
+                              char *title, size_t capacity )
+{
+    size_t len, i;
+
+    if (!resolve_display_name || !image_len || !env_len || build_dir) return FALSE;
+    len = resolve_display_name( image, image_len, env, env_len, title, capacity );
+    if (!len || len >= capacity || title[0] == '.' || title[len]) return FALSE;
+    for (i = 0; i < len; ++i)
+        if ((unsigned char)title[i] < 32 || title[i] == 127 || title[i] == '/') return FALSE;
+    return TRUE;
+}
+#endif
+
+char *get_compat_named_loader( const UNICODE_STRING *image, const WCHAR *env, size_t env_len, int *lease )
+{
+#if defined(__APPLE__) && defined(__aarch64__)
+    char title[241], temp[PATH_MAX];
+    size_t len;
+    char *path;
+
+    if (!get_display_name( image->Buffer, image->Length / sizeof(WCHAR), env, env_len, title, sizeof(title) ))
+        return NULL;
+    if (!(len = confstr( _CS_DARWIN_USER_TEMP_DIR, temp, sizeof(temp) )) || len > sizeof(temp)) return NULL;
+    path = prepare_named_loader( temp, ntdll_dir, title, lease );
+    if (!path) WARN( "could not prepare named loader for %s\n", debugstr_a(title) );
+    return path;
+#else
+    return NULL;
+#endif
+}
+
 /* exec the appropriate wine loader for the specified machine */
-static NTSTATUS loader_exec( char **argv, WORD machine )
+static NTSTATUS loader_exec( char **argv, WORD machine, char *named_loader, int lease )
 {
     static char noexec[] = "WINELOADERNOEXEC=1";
 
     putenv( noexec );
 
     if (((argv[1] = get_alternate_wineloader( machine )))) preloader_exec( argv );
+
+#if defined(__APPLE__) && defined(__aarch64__)
+    if ((argv[1] = named_loader) && inherit_named_loader( lease, named_loader, ntdll_dir ))
+    {
+        preloader_exec( argv );
+        WARN( "could not exec named loader %s (%d); using default loader\n", debugstr_a(named_loader), errno );
+        unsetenv( NAMED_LOADER_LEASE_ENV );
+        close( lease );
+    }
+#endif
 
     argv[1] = strdup( wineloader );
     preloader_exec( argv );
@@ -745,7 +793,8 @@ static NTSTATUS loader_exec( char **argv, WORD machine )
  *
  * argv[0] and argv[1] must be reserved for the preloader and loader respectively.
  */
-NTSTATUS exec_wineloader( char **argv, int socketfd, const struct pe_image_info *pe_info )
+NTSTATUS exec_wineloader( char **argv, int socketfd, const struct pe_image_info *pe_info,
+                          char *named_loader, int lease )
 {
     WORD machine = pe_info->machine;
     char preloader_reserve[64], socket_env[64];
@@ -765,7 +814,7 @@ NTSTATUS exec_wineloader( char **argv, int socketfd, const struct pe_image_info 
         putenv( preloader_reserve );
     }
 
-    return loader_exec( argv, machine );
+    return loader_exec( argv, machine, named_loader, lease );
 }
 
 
@@ -2092,20 +2141,52 @@ static ULONG_PTR get_image_address(void)
     return 0;
 }
 
-/***********************************************************************
- *           load_compatdb
- *
- * CW Hack 24067: load compatdb.so, whose initializer applies the rules that
- * match the process, before the first PE code runs.
- */
+#if defined(__APPLE__) && defined(__aarch64__)
+/* Presence of this marker tells the library constructor to defer applying the
+ * current process's rules until load_compatdb() below. */
+DECLSPEC_EXPORT const int ntdll_defer_compatdb_apply = 1;
+static void *early_compatdb;
+
+BOOL initial_image_needs_named_loader( const WCHAR *image, const WCHAR *env, size_t env_len )
+{
+    char *name, title[241];
+
+    /* Never run a legacy compatdb.so initializer before the PEB is complete. */
+    if (build_dir || asprintf( &name, "%s/compatdb-before-image.so", ntdll_dir ) == -1) return FALSE;
+    early_compatdb = dlopen( name, RTLD_LOCAL | RTLD_LAZY );
+    free( name );
+    if (!early_compatdb) return FALSE;
+    resolve_display_name = dlsym( early_compatdb, "compatdb_resolve_display_name" );
+    return get_display_name( image, wcslen(image), env, env_len, title, sizeof(title) );
+}
+#endif
+
 static void load_compatdb(void)
 {
     char *name;
+    void *handle = NULL;
 
-    if (asprintf( &name, "%s/compatdb.so", ntdll_dir ) == -1) return;
-    if (!dlopen( name, RTLD_LOCAL | RTLD_LAZY ))
-        WARN( "error loading compatdb.so: %s\n", dlerror() );
-    free( name );
+#if defined(__APPLE__) && defined(__aarch64__)
+    handle = early_compatdb;
+#endif
+    if (!handle)
+    {
+        if (asprintf( &name, "%s/compatdb.so", ntdll_dir ) == -1) return;
+        handle = dlopen( name, RTLD_LOCAL | RTLD_LAZY );
+        free( name );
+        if (!handle)
+        {
+            WARN( "error loading compatdb.so: %s\n", dlerror() );
+            return;
+        }
+    }
+#if defined(__APPLE__) && defined(__aarch64__)
+    {
+        void (*apply)(void) = dlsym( handle, "compatdb_apply_current_process" );
+        if (apply) apply(); /* legacy libraries already applied settings in dlopen */
+        resolve_display_name = dlsym( handle, "compatdb_resolve_display_name" );
+    }
+#endif
 }
 
 /***********************************************************************
@@ -2297,7 +2378,7 @@ static void reexec_loader( int argc, char *argv[], char *extra_arg )
     /* default to 32-bit loader to support 32-bit prefixes */
     if (machine == IMAGE_FILE_MACHINE_AMD64) machine = IMAGE_FILE_MACHINE_I386;
 
-    loader_exec( new_argv, machine );
+    loader_exec( new_argv, machine, NULL, -1 );
     fatal_error( "could not exec the wine loader\n" );
 }
 
@@ -2368,6 +2449,9 @@ DECLSPEC_EXPORT void __wine_main( int argc, char *argv[] )
 {
     main_argc = argc;
     main_argv = argv;
+#if defined(__APPLE__) && defined(__aarch64__)
+    adopt_named_loader();
+#endif
 
     init_paths();
     if (!getenv( "WINELOADERNOEXEC" ) || argc <= 1) check_command_line( argc, argv );

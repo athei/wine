@@ -409,10 +409,14 @@ static BOOL is_unix_console_handle( HANDLE handle )
  *           spawn_process
  */
 static NTSTATUS spawn_process( const RTL_USER_PROCESS_PARAMETERS *params, int socketfd,
-                               int unixdir, char *winedebug, const struct pe_image_info *pe_info )
+                               int unixdir, char *winedebug, ULONG env_size,
+                               const struct pe_image_info *pe_info )
 {
     NTSTATUS status = STATUS_SUCCESS;
     int stdin_fd = -1, stdout_fd = -1;
+    int lease = -1;
+    char *named_loader = get_compat_named_loader( &params->ImagePathName, params->Environment,
+                                                 env_size / sizeof(WCHAR), &lease );
     pid_t pid;
     char **argv;
 
@@ -450,7 +454,7 @@ static NTSTATUS spawn_process( const RTL_USER_PROCESS_PARAMETERS *params, int so
             }
             argv = build_argv( &params->CommandLine, 2 );
 
-            exec_wineloader( argv, socketfd, pe_info );
+            exec_wineloader( argv, socketfd, pe_info, named_loader, lease );
             _exit(1);
         }
 
@@ -467,6 +471,8 @@ static NTSTATUS spawn_process( const RTL_USER_PROCESS_PARAMETERS *params, int so
     }
     else status = STATUS_NO_MEMORY;
 
+    if (lease != -1) close( lease );
+    free( named_loader );
     if (stdin_fd != -1 && stdin_fd != 0) close( stdin_fd );
     if (stdout_fd != -1 && stdout_fd != 1) close( stdout_fd );
     return status;
@@ -893,7 +899,7 @@ NTSTATUS WINAPI NtCreateUserProcess( HANDLE *process_handle_ptr, HANDLE *thread_
 
     /* create the child process */
 
-    if ((status = spawn_process( params, socketfd[0], unixdir, winedebug, &pe_info ))) goto done;
+    if ((status = spawn_process( params, socketfd[0], unixdir, winedebug, env_size, &pe_info ))) goto done;
 
     close( socketfd[0] );
     socketfd[0] = -1;
