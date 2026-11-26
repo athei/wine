@@ -19,6 +19,7 @@
  */
 
 #import "config.h"
+#include <dlfcn.h>
 #import "macdrv.h"
 
 #import "cocoa_app.h"
@@ -30,6 +31,28 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(macdrv);
 
+
+/* AppKit supplies the bold application menu heading itself. Changing the
+ * NSMenuItem title doesn't update the running application's display name.
+ * Publish it for this process only, without editing the signed bundle. */
+static void set_running_application_name(NSString *name)
+{
+    CFTypeRef (*get_asn)(void) = dlsym(RTLD_DEFAULT, "_LSGetCurrentApplicationASN");
+    OSStatus (*set_item)(int, CFTypeRef, CFStringRef, CFTypeRef, CFDictionaryRef *) =
+        dlsym(RTLD_DEFAULT, "_LSSetApplicationInformationItem");
+    const CFStringRef *key = dlsym(RTLD_DEFAULT, "_kLSDisplayNameKey");
+    CFTypeRef asn;
+    OSStatus status;
+
+    if (!get_asn || !set_item || !key || !*key || !(asn = get_asn()))
+    {
+        WARN("LaunchServices display name unavailable\n");
+        return;
+    }
+    /* -2 selects the current LaunchServices session. */
+    status = set_item(-2, asn, *key, (CFStringRef)name, NULL);
+    if (status) WARN("Could not set LaunchServices display name: %d\n", (int)status);
+}
 
 static NSString* const WineAppWaitQueryResponseMode = @"WineAppWaitQueryResponseMode";
 
@@ -269,12 +292,12 @@ static NSString* WineLocalizedString(unsigned int stringID)
 
             // Application menu
             NSString *menuName = WineLocalizedString(STRING_MENU_WINE);
-            bundleName = nil;
+            NSString *namedTitle = nil;
 #ifdef __aarch64__
             const char *name = ntdll_get_named_loader_title();
-            if (name) bundleName = [NSString stringWithUTF8String:name];
+            if (name) namedTitle = [NSString stringWithUTF8String:name];
 #endif
-            if (bundleName) menuName = bundleName;
+            if (namedTitle) menuName = bundleName = namedTitle;
             else bundleName = [[NSBundle mainBundle] objectForInfoDictionaryKey:(NSString*)kCFBundleNameKey];
             submenu = [[[NSMenu alloc] initWithTitle:menuName] autorelease];
 
@@ -331,6 +354,7 @@ static NSString* WineLocalizedString(unsigned int stringID)
 
             [NSApp setMainMenu:mainMenu];
             [NSApp setWindowsMenu:submenu];
+            if (namedTitle) set_running_application_name(namedTitle);
 
             [NSApp setApplicationIconImage:self.applicationIcon];
         }
