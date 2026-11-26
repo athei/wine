@@ -1880,7 +1880,7 @@ static RTL_USER_PROCESS_PARAMETERS *build_initial_params(void)
     static const WCHAR pathW[] = {'P','A','T','H'};
     RTL_USER_PROCESS_PARAMETERS *params = NULL;
     SIZE_T size, env_pos, env_size;
-    WCHAR *dst, *cmdline, *path, *bootstrap, *named_target = NULL;
+    WCHAR *dst, *cmdline, *path, *bootstrap;
     WCHAR *env = get_initial_environment( &env_pos, &env_size );
     WCHAR *curdir = get_initial_directory();
     UNICODE_STRING nt_name;
@@ -1931,18 +1931,7 @@ static RTL_USER_PROCESS_PARAMETERS *build_initial_params(void)
         }
     }
 
-#if defined(__APPLE__) && defined(__aarch64__)
-    /* A direct Unix launch normally becomes the target itself. For a matching
-     * title only, reuse start.exe /exec so CreateProcess selects the named
-     * native loader, just as for a launch from an existing Windows process. */
-    if (!status)
-    {
-        WCHAR *dos = get_dos_path( nt_name.Buffer );
-        if (initial_image_needs_named_loader( dos, env, env_pos ) &&
-            (named_target = malloc( (wcslen(dos) + 1) * sizeof(WCHAR) ))) wcscpy( named_target, dos );
-    }
-#endif
-    if (status || named_target)  /* try launching it through start.exe */
+    if (status)  /* try launching it through start.exe */
     {
         static const char *args[] = { "start.exe", "/exec" };
         free( nt_name.Buffer );
@@ -1959,8 +1948,6 @@ static RTL_USER_PROCESS_PARAMETERS *build_initial_params(void)
     virtual_alloc_first_teb();
 
     main_wargv = build_wargv( get_dos_path( nt_name.Buffer ));
-    /* Pass the resolved absolute DOS path even when argv[1] was a Unix path. */
-    if (named_target) main_wargv[2] = named_target;
     cmdline = build_command_line( main_wargv );
 
     TRACE( "image %s cmdline %s dir %s\n",
