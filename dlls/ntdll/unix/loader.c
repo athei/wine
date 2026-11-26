@@ -2161,6 +2161,11 @@ BOOL initial_image_needs_named_loader( const WCHAR *image, const WCHAR *env, siz
 }
 #endif
 
+/***********************************************************************
+ *           load_compatdb
+ *
+ * Apply per-process compatdb settings once the Windows image is ready.
+ */
 static void load_compatdb(void)
 {
     char *name;
