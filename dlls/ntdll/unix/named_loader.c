@@ -165,27 +165,61 @@ static int valid_dependency( int fd, const char *expected )
            !memcmp( target, expected, len ) && !fstatat( fd, "ntdll.so", &st, 0 ) && S_ISREG(st.st_mode);
 }
 
+/* macOS can display ':' in a POSIX filename as '/'. Keep the unmodified
+ * display name on the lease directory, never inside the signed bundle. */
+#define TITLE_ATTR "org.winehq.named-loader.title"
+
+static int bundle_name( const char *title, char name[NAME_MAX + 1] )
+{
+    size_t i, n = 0;
+    int nonblank = 0;
+
+    for (i = 0; title[i]; ++i)
+    {
+        unsigned char c = title[i];
+        if (i >= NAME_MAX || c == '/' || c < 32 || c == 127) return 0;
+        if (c == ':') continue;
+        if (n >= NAME_MAX - 4) return 0;
+        if (c != ' ') nonblank = 1;
+        name[n++] = c;
+    }
+    if (!nonblank || name[0] == '.') return 0;
+    memcpy( name + n, ".app", 5 );
+    return 1;
+}
+
+static int read_title( int fd, char title[NAME_MAX + 1] )
+{
+    ssize_t len = fgetxattr( fd, TITLE_ATTR, title, NAME_MAX, 0, 0 );
+    if (len <= 0 || memchr( title, 0, len )) return 0;
+    title[len] = 0;
+    return 1;
+}
+
 char *prepare_named_loader( const char *parent, const char *ntdll_dir, const char *title, int *lease )
 {
     char root_path[PATH_MAX], entry[PATH_MAX], bundle[PATH_MAX], exe[PATH_MAX];
     char src[PATH_MAX], ntdll[PATH_MAX], link[PATH_MAX], key[2*HASH_LEN + 2], digest[HASH_LEN + 1];
+    char name[NAME_MAX + 1], saved_title[NAME_MAX + 1];
     char *ret = NULL;
     DIR *root;
     CC_SHA256_CTX ctx;
     struct stat st;
-    int fd = -1, root_fd, n;
+    int fd = -1, root_fd;
 
     *lease = -1;
-    if (!join_path( root_path, parent, "wine-named-loaders-v3" ) ||
+    if (!bundle_name( title, name ) || !join_path( root_path, parent, "wine-named-loaders-v3" ) ||
         !join_path( ntdll, ntdll_dir, "ntdll.so" ) || !join_path( src, ntdll_dir, "wine.app" )) return NULL;
     CC_SHA256_Init( &ctx );
+    /* Older entries derived the menu title from the filename and don't have
+     * TITLE_ATTR. Don't invalidate a live lease when upgrading the format. */
+    CC_SHA256_Update( &ctx, TITLE_ATTR, sizeof(TITLE_ATTR) );
     CC_SHA256_Update( &ctx, ntdll_dir, strlen(ntdll_dir) + 1 );
     CC_SHA256_Update( &ctx, title, strlen(title) + 1 );
     hex_digest( &ctx, key );
     key[HASH_LEN] = '-';
     if (!bundle_digest( src, key + HASH_LEN + 1 ) || !join_path( entry, root_path, key )) return NULL;
-    n = snprintf( bundle, sizeof(bundle), "%s/%s.app", entry, title );
-    if (n <= 0 || n >= (int)sizeof(bundle) || !join_path( link, entry, "ntdll.so" ) ||
+    if (!join_path( bundle, entry, name ) || !join_path( link, entry, "ntdll.so" ) ||
         !join_path( exe, bundle, "Contents/MacOS/wine" )) return NULL;
     if (mkdir( root_path, 0700 ) && errno != EEXIST) return NULL;
     if ((root_fd = open( root_path, DIR_FLAGS | O_EXLOCK )) == -1) return NULL;
@@ -197,7 +231,8 @@ char *prepare_named_loader( const char *parent, const char *ntdll_dir, const cha
     prune_entries( root, root_path, key );
     if ((fd = open( entry, DIR_FLAGS | O_SHLOCK )) != -1)
     {
-        if (valid_dependency( fd, ntdll ) && !access( exe, X_OK ) && bundle_digest( bundle, digest ) &&
+        if (read_title( fd, saved_title ) && !strcmp( title, saved_title ) &&
+            valid_dependency( fd, ntdll ) && !access( exe, X_OK ) && bundle_digest( bundle, digest ) &&
             !strcmp( digest, key + HASH_LEN + 1 )) goto ready;
         /* Never mutate or repair a bundle leased by another process. */
         if (flock( fd, LOCK_EX | LOCK_NB ) == -1 || removefile( entry, NULL, REMOVEFILE_RECURSIVE )) goto done;
@@ -205,7 +240,7 @@ char *prepare_named_loader( const char *parent, const char *ntdll_dir, const cha
         fd = -1;
     }
     if (mkdir( entry, 0700 ) || (fd = open( entry, DIR_FLAGS | O_SHLOCK )) == -1) goto done;
-    if (symlink( ntdll, link ) ||
+    if (fsetxattr( fd, TITLE_ATTR, title, strlen(title), 0, XATTR_CREATE ) || symlink( ntdll, link ) ||
         copyfile( src, bundle, NULL, COPYFILE_ALL | COPYFILE_RECURSIVE | COPYFILE_NOFOLLOW | COPYFILE_CLONE ) ||
         !valid_dependency( fd, ntdll ) || access( exe, X_OK ) || !bundle_digest( bundle, digest ) ||
         strcmp( digest, key + HASH_LEN + 1 ))
@@ -257,7 +292,7 @@ const char *adopt_named_loader(void)
 {
     static const char suffix[] = ".app/Contents/MacOS/wine";
     static char title[NAME_MAX + 1];
-    char exe[PATH_MAX], *end, *name;
+    char exe[PATH_MAX], expected[NAME_MAX + 1], *end, *name;
     const char *ret = NULL;
     uint32_t size = sizeof(exe);
     const char *value = getenv( NAMED_LOADER_LEASE_ENV );
@@ -276,7 +311,8 @@ const char *adopt_named_loader(void)
             *name++ = 0;
             if (*name && strlen( name ) < sizeof(title) && !stat( exe, &path_st ) && !fstat( fd, &fd_st ) &&
                 S_ISDIR( fd_st.st_mode ) && fd_st.st_ino == path_st.st_ino && fd_st.st_dev == path_st.st_dev &&
-                !fcntl( fd, F_SETFD, FD_CLOEXEC )) ret = strcpy( title, name );
+                !fcntl( fd, F_SETFD, FD_CLOEXEC ) && read_title( fd, title ) && bundle_name( title, expected ) &&
+                strlen(name) + 4 == strlen(expected) && !strncmp( expected, name, strlen(name) )) ret = title;
         }
     }
     unsetenv( NAMED_LOADER_LEASE_ENV );

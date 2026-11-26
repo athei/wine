@@ -6,6 +6,7 @@
 
 char *prepare_named_loader( const char *parent, const char *ntdll_dir, const char *title, int *lease );
 int inherit_named_loader( int lease, const char *path, const char *ntdll_dir );
+/* Return the original display name, not the filesystem spelling. */
 const char *adopt_named_loader(void);
 
 #endif
