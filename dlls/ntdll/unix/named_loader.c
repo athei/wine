@@ -102,17 +102,12 @@ static int bundle_digest( char *path, char hex[HASH_LEN + 1] )
          * Resource forks aren't part of a supported signed Mach9 bundle. */
         if (getxattr( ent->fts_path, XATTR_RESOURCEFORK_NAME, NULL, 0, 0, XATTR_NOFOLLOW ) != -1 ||
             errno != ENOATTR) goto done;
-        n = getxattr( ent->fts_path, "com.apple.quarantine", buffer, sizeof(buffer), 0, XATTR_NOFOLLOW );
-        if (n == -1 && errno != ENOATTR) goto done;
-        /* copyfile may rewrite the informational download time and agent on
-         * directories; compare the quarantine flags rather than that history. */
-        if (ent->fts_info == FTS_D && n > 0)
-        {
-            char *end = memchr( buffer, ';', n );
-            if (end) n = end - buffer;
-        }
+        /* macOS may update quarantine metadata on first launch. Require the
+         * marker on the same entries without making its value part of the key. */
+        n = getxattr( ent->fts_path, "com.apple.quarantine", NULL, 0, 0, XATTR_NOFOLLOW );
+        if (!n || (n == -1 && errno != ENOATTR)) goto done;
+        if (n > 0) n = 1;
         CC_SHA256_Update( &ctx, &n, sizeof(n) );
-        if (n > 0) CC_SHA256_Update( &ctx, buffer, n );
         if (ent->fts_info == FTS_D) continue;
         size = ent->fts_statp->st_size;
         CC_SHA256_Update( &ctx, &size, sizeof(size) );
