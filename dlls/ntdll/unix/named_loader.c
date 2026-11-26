@@ -222,7 +222,9 @@ char *prepare_named_loader( const char *parent, const char *ntdll_dir, const cha
     if (!join_path( bundle, entry, name ) || !join_path( link, entry, "ntdll.so" ) ||
         !join_path( exe, bundle, "Contents/MacOS/wine" )) return NULL;
     if (mkdir( root_path, 0700 ) && errno != EEXIST) return NULL;
-    if ((root_fd = open( root_path, DIR_FLAGS | O_EXLOCK )) == -1) return NULL;
+    /* Another launch may be copying or verifying a bundle. Use the default
+     * loader rather than waiting for the per-user cache lock. */
+    if ((root_fd = open( root_path, DIR_FLAGS | O_EXLOCK | O_NONBLOCK )) == -1) return NULL;
     if (fstat( root_fd, &st ) || st.st_uid != geteuid() || (st.st_mode & 077) || !(root = fdopendir( root_fd )))
     {
         close( root_fd );
