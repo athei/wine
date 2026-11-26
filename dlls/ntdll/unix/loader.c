@@ -742,7 +742,7 @@ const char *ntdll_get_named_loader_title(void)
     return named_loader_title;
 }
 
-static char *named_loader_for_title( const char *title, size_t len, size_t capacity, int *lease )
+static char *named_loader_for_title( const char *title, size_t len, size_t capacity, int *lease, BOOL early )
 {
     char temp[PATH_MAX];
     size_t i;
@@ -753,7 +753,13 @@ static char *named_loader_for_title( const char *title, size_t len, size_t capac
         if ((unsigned char)title[i] < 32 || title[i] == 127 || title[i] == '/') return NULL;
     if (!(len = confstr( _CS_DARWIN_USER_CACHE_DIR, temp, sizeof(temp) )) || len > sizeof(temp)) return NULL;
     path = prepare_named_loader( temp, ntdll_dir, title, lease );
-    if (!path) WARN( "could not prepare named loader for %s\n", debugstr_a(title) );
+    if (!path)
+    {
+        /* The initial loader runs before virtual_init() sets up Wine TLS. */
+        if (early)
+            fprintf( stderr, "wine: could not prepare named loader for %s; continuing with default loader\n", title );
+        else WARN( "could not prepare named loader for %s\n", debugstr_a(title) );
+    }
     return path;
 }
 #endif
@@ -766,7 +772,7 @@ char *get_compat_named_loader( const UNICODE_STRING *image, const WCHAR *env, si
 
     if (!resolve_display_name || !image->Length || !env_len || build_dir) return NULL;
     len = resolve_display_name( image->Buffer, image->Length / sizeof(WCHAR), env, env_len, title, sizeof(title) );
-    return named_loader_for_title( title, len, sizeof(title), lease );
+    return named_loader_for_title( title, len, sizeof(title), lease, FALSE );
 #else
     return NULL;
 #endif
@@ -2176,11 +2182,11 @@ static void exec_named_initial_loader( char **argv )
             break;
         }
     len = resolve( argv[1], config_dir, appid, title, sizeof(title) );
-    if (!(name = named_loader_for_title( title, len, sizeof(title), &lease ))) return;
+    if (!(name = named_loader_for_title( title, len, sizeof(title), &lease, TRUE ))) return;
     if (inherit_named_loader( lease, name, ntdll_dir ))
     {
         exec_loader_image( name, argv );
-        WARN( "could not exec named loader %s (%d); continuing with default loader\n", debugstr_a(name), errno );
+        fprintf( stderr, "wine: could not exec named loader %s (%d); continuing with default loader\n", name, errno );
         unsetenv( NAMED_LOADER_LEASE_ENV );
     }
     close( lease );
