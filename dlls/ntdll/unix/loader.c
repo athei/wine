@@ -754,7 +754,7 @@ char *get_compat_named_loader( const UNICODE_STRING *image, const WCHAR *env, si
 
     if (!get_display_name( image->Buffer, image->Length / sizeof(WCHAR), env, env_len, title, sizeof(title) ))
         return NULL;
-    if (!(len = confstr( _CS_DARWIN_USER_TEMP_DIR, temp, sizeof(temp) )) || len > sizeof(temp)) return NULL;
+    if (!(len = confstr( _CS_DARWIN_USER_CACHE_DIR, temp, sizeof(temp) )) || len > sizeof(temp)) return NULL;
     path = prepare_named_loader( temp, ntdll_dir, title, lease );
     if (!path) WARN( "could not prepare named loader for %s\n", debugstr_a(title) );
     return path;
