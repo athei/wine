@@ -1627,7 +1627,20 @@ static void usr2_handler( int signal, siginfo_t *siginfo, void *_sigcontext )
  */
 NTSTATUS get_thread_ldt_entry( HANDLE handle, THREAD_DESCRIPTOR_INFORMATION *info, ULONG len )
 {
-    return STATUS_NOT_IMPLEMENTED;
+    THREAD_BASIC_INFORMATION tbi;
+    NTSTATUS status;
+
+    if (len != sizeof(*info)) return STATUS_INFO_LENGTH_MISMATCH;
+    if (info->Selector >> 16) return STATUS_UNSUCCESSFUL;
+    if (!(info->Selector & 4)) return STATUS_UNSUCCESSFUL;  /* GDT selector */
+
+    if (handle != GetCurrentThread())
+    {
+        status = NtQueryInformationThread( handle, ThreadBasicInformation, &tbi, sizeof(tbi), NULL );
+        if (status) return status;
+    }
+    /* there is no LDT, so no LDT selector has an entry */
+    return STATUS_UNSUCCESSFUL;
 }
 
 
