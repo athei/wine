@@ -2197,7 +2197,8 @@ static void exec_named_initial_loader( char **argv )
 /***********************************************************************
  *           load_compatdb
  *
- * Apply per-process compatdb settings once the Windows image is ready.
+ * CW Hack 24067: apply the compatdb rules that match the process once the
+ * Windows image is ready, before the first PE code runs.
  */
 static void load_compatdb(void)
 {
