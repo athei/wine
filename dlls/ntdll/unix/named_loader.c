@@ -143,24 +143,33 @@ int inherit_named_loader( int lease, const char *exe, const char *ntdll_dir )
 /* Keep the inherited lease for this process, but not its children. Only
  * alter an fd if it names the directory around our actual running bundle.
  * The kernel closes it on exit, including abrupt Windows termination. */
-void adopt_named_loader(void)
+const char *adopt_named_loader(void)
 {
-    char exe[PATH_MAX], *end;
+    static const char suffix[] = ".app/Contents/MacOS/wine";
+    static char title[NAME_MAX + 1];
+    char exe[PATH_MAX], *end, *name;
+    const char *ret = NULL;
     uint32_t size = sizeof(exe);
     const char *value = getenv( NAMED_LOADER_LEASE_ENV );
     struct stat fd_st, path_st;
     long fd;
-    int i;
+    size_t len;
 
-    if (!value) return;
+    if (!value) return NULL;
     fd = strtol( value, &end, 10 );
-    if (end != value && !*end && fd >= 0 && fd <= INT_MAX && !_NSGetExecutablePath( exe, &size ))
+    if (end != value && !*end && fd > STDERR_FILENO && fd <= INT_MAX && !_NSGetExecutablePath( exe, &size ) &&
+        (len = strlen( exe )) >= sizeof(suffix) && !strcmp( exe + len - (sizeof(suffix) - 1), suffix ))
     {
-        for (i = 0; i < 4 && (end = strrchr( exe, '/' )); ++i) *end = 0;
-        if (i == 4 && !stat( exe, &path_st ) && !fstat( fd, &fd_st ) && S_ISDIR( fd_st.st_mode ) &&
-            fd_st.st_ino == path_st.st_ino && fd_st.st_dev == path_st.st_dev)
-            fcntl( fd, F_SETFD, FD_CLOEXEC );
+        exe[len - (sizeof(suffix) - 1)] = 0;
+        if ((name = strrchr( exe, '/' )))
+        {
+            *name++ = 0;
+            if (*name && strlen( name ) < sizeof(title) && !stat( exe, &path_st ) && !fstat( fd, &fd_st ) &&
+                S_ISDIR( fd_st.st_mode ) && fd_st.st_ino == path_st.st_ino && fd_st.st_dev == path_st.st_dev &&
+                !fcntl( fd, F_SETFD, FD_CLOEXEC )) ret = strcpy( title, name );
+        }
     }
     unsetenv( NAMED_LOADER_LEASE_ENV );
+    return ret;
 }
 #endif

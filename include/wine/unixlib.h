@@ -48,6 +48,9 @@ NTSYSAPI int ntdll_get_compat_dpi_awareness(void);  /* CW Hack 24067 */
 NTSYSAPI int ntdll_get_compat_gcmouse(void);
 NTSYSAPI int ntdll_get_compat_opengl(void);
 NTSYSAPI int ntdll_get_compat_capture(void);
+#if defined(__APPLE__) && defined(__aarch64__)
+NTSYSAPI const char *ntdll_get_named_loader_title(void);
+#endif
 
 /* the bits of ntdll_get_compat_capture() */
 #define WINE_COMPAT_CAPTURE_VULKAN  0x1  /* GFXReconstruct's capture layer */

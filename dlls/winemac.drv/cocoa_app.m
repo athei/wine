@@ -268,8 +268,15 @@ static NSString* WineLocalizedString(unsigned int stringID)
             mainMenu = [[[NSMenu alloc] init] autorelease];
 
             // Application menu
-            submenu = [[[NSMenu alloc] initWithTitle:WineLocalizedString(STRING_MENU_WINE)] autorelease];
-            bundleName = [[NSBundle mainBundle] objectForInfoDictionaryKey:(NSString*)kCFBundleNameKey];
+            NSString *menuName = WineLocalizedString(STRING_MENU_WINE);
+            bundleName = nil;
+#ifdef __aarch64__
+            const char *name = ntdll_get_named_loader_title();
+            if (name) bundleName = [NSString stringWithUTF8String:name];
+#endif
+            if (bundleName) menuName = bundleName;
+            else bundleName = [[NSBundle mainBundle] objectForInfoDictionaryKey:(NSString*)kCFBundleNameKey];
+            submenu = [[[NSMenu alloc] initWithTitle:menuName] autorelease];
 
             if ([bundleName length])
                 title = [NSString stringWithFormat:WineLocalizedString(STRING_MENU_ITEM_HIDE_APPNAME), bundleName];
@@ -295,7 +302,7 @@ static NSString* WineLocalizedString(unsigned int stringID)
             item = [submenu addItemWithTitle:title action:@selector(terminate:) keyEquivalent:@"q"];
             [item setKeyEquivalentModifierMask:NSEventModifierFlagCommand | NSEventModifierFlagOption];
             item = [[[NSMenuItem alloc] init] autorelease];
-            [item setTitle:WineLocalizedString(STRING_MENU_WINE)];
+            [item setTitle:menuName];
             [item setSubmenu:submenu];
             [mainMenu addItem:item];
 

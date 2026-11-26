@@ -730,6 +730,12 @@ static void preloader_exec( char **argv )
 
 #if defined(__APPLE__) && defined(__aarch64__)
 static size_t (*resolve_display_name)( const WCHAR *, size_t, const WCHAR *, size_t, char *, size_t );
+static const char *named_loader_title;
+
+const char *ntdll_get_named_loader_title(void)
+{
+    return named_loader_title;
+}
 
 static BOOL get_display_name( const WCHAR *image, size_t image_len, const WCHAR *env, size_t env_len,
                               char *title, size_t capacity )
@@ -2455,7 +2461,7 @@ DECLSPEC_EXPORT void __wine_main( int argc, char *argv[] )
     main_argc = argc;
     main_argv = argv;
 #if defined(__APPLE__) && defined(__aarch64__)
-    adopt_named_loader();
+    named_loader_title = adopt_named_loader();
 #endif
 
     init_paths();
