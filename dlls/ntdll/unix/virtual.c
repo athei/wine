@@ -4735,6 +4735,30 @@ void *virtual_setup_exception( struct thread_data *data, void *stack_ptr, size_t
 }
 
 
+#ifdef WX_EXCLUSIVE_HOST
+/***********************************************************************
+ *           make_exec_write_page_writable
+ *
+ * A write by the server or the kernel goes through the host protection, which lacks write access
+ * on an exec+write page that is currently mapped executable. Flip such a page to writable, as a
+ * write fault would, and update its protection byte in *vprot. The caller holds virtual_mutex
+ * until its write is done, so that no thread flips the page back in between.
+ */
+static void make_exec_write_page_writable( char *page, BYTE *vprot )
+{
+    struct file_view *view;
+
+    if (!is_vprot_exec_write( *vprot ) || (*vprot & VPROT_GUARD) || !(*vprot & VPROT_EXECMODE)) return;
+    /* in JIT views VPROT_EXECMODE marks the MAP_JIT backing, which is writable */
+    if (jit_view_count && (view = find_view( page, 0 )) && is_jit_view( view )) return;
+    TRACE( "flipping %p to writable\n", page );
+    set_page_vprot_bits( page, host_page_size, 0, VPROT_EXECMODE );
+    mprotect_range( page, host_page_size, 0, 0 );
+    *vprot &= ~VPROT_EXECMODE;
+}
+#endif
+
+
 /***********************************************************************
  *           check_write_access
  *
@@ -4749,6 +4773,9 @@ static NTSTATUS check_write_access( void *base, size_t size, BOOL *has_write_wat
     for (i = 0; i < size; i += host_page_size)
     {
         BYTE vprot = get_host_page_vprot( addr + i );
+#ifdef WX_EXCLUSIVE_HOST
+        make_exec_write_page_writable( addr + i, &vprot );
+#endif
         if (vprot & VPROT_WRITEWATCH) *has_write_watch = TRUE;
         if (!(get_unix_prot( vprot & ~VPROT_WRITEWATCH ) & PROT_WRITE))
             return STATUS_INVALID_USER_BUFFER;
@@ -6820,6 +6847,57 @@ NTSTATUS WINAPI NtReadVirtualMemory( HANDLE process, const void *addr, void *buf
 }
 
 
+static unsigned int server_write_memory( HANDLE process, void *addr, const void *buffer, SIZE_T *size )
+{
+    unsigned int status;
+
+    SERVER_START_REQ( write_process_memory )
+    {
+        req->handle     = wine_server_obj_handle( process );
+        req->addr       = wine_server_client_ptr( addr );
+        wine_server_add_data( req, buffer, *size );
+        status = wine_server_call( req );
+        *size = reply->written;
+    }
+    SERVER_END_REQ;
+    return status;
+}
+
+
+#ifdef WX_EXCLUSIVE_HOST
+/***********************************************************************
+ *           retry_own_write
+ *
+ * The server writes through the host protection, so a write into the current process fails with
+ * STATUS_PARTIAL_COPY on an exec+write page that is mapped executable, after it wrote the part
+ * before that page. The caller passes the rest of the range, from the first write's count on.
+ * Flip its pages to writable and write it, with virtual_mutex held until the write is done, so
+ * that no thread flips them back in between. Writing only the rest keeps the bytes the first
+ * write put there; a source above the destination is not changed in its rest, and the caller
+ * passes a copy of one below it that the destination overlaps. A write that failed for another
+ * reason, such as a read-only page, fails the same way again.
+ */
+static unsigned int retry_own_write( HANDLE process, void *addr, const void *buffer, SIZE_T *size )
+{
+    char *start = ROUND_ADDR( addr, host_page_mask ), *page;
+    size_t range = ROUND_SIZE( addr, *size, host_page_mask );
+    unsigned int status;
+    sigset_t sigset;
+    BYTE vprot;
+
+    server_enter_uninterrupted_section( &virtual_mutex, &sigset );
+    for (page = start; page < start + range; page += host_page_size)
+    {
+        vprot = get_host_page_vprot( page );
+        make_exec_write_page_writable( page, &vprot );
+    }
+    status = server_write_memory( process, addr, buffer, size );
+    server_leave_uninterrupted_section( &virtual_mutex, &sigset );
+    return status;
+}
+#endif
+
+
 /***********************************************************************
  *             NtWriteVirtualMemory   (NTDLL.@)
  *             ZwWriteVirtualMemory   (NTDLL.@)
@@ -6831,15 +6909,32 @@ NTSTATUS WINAPI NtWriteVirtualMemory( HANDLE process, void *addr, const void *bu
 
     if (virtual_check_buffer_for_read( buffer, size ))
     {
-        SERVER_START_REQ( write_process_memory )
+#ifdef WX_EXCLUSIVE_HOST
+        SIZE_T total = size;
+        BOOL can_retry = TRUE;
+        void *copy = NULL;
+
+        /* a retry reads the rest of the source after the first write, which changes the part of a
+         * source below the destination that the destination overlaps, so it writes from a copy */
+        if ((const char *)buffer < (char *)addr && (char *)addr < (const char *)buffer + size)
         {
-            req->handle     = wine_server_obj_handle( process );
-            req->addr       = wine_server_client_ptr( addr );
-            wine_server_add_data( req, buffer, size );
-            status = wine_server_call( req );
-            size = reply->written;
+            if ((copy = malloc( size ))) buffer = memcpy( copy, buffer, size );
+            else can_retry = FALSE;
         }
-        SERVER_END_REQ;
+#endif
+        status = server_write_memory( process, addr, buffer, &size );
+#ifdef WX_EXCLUSIVE_HOST
+        if (status == STATUS_PARTIAL_COPY && can_retry &&
+            (process == NtCurrentProcess() || !NtCompareObjects( process, NtCurrentProcess() )))
+        {
+            SIZE_T done = size;
+
+            size = total - done;
+            status = retry_own_write( process, (char *)addr + done, (const char *)buffer + done, &size );
+            size += done;
+        }
+        free( copy );
+#endif
     }
     else
     {
