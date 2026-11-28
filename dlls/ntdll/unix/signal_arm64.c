@@ -28,6 +28,7 @@
 
 #include <assert.h>
 #include <dlfcn.h>
+#include <errno.h>
 #include <stdbool.h>
 #include <pthread.h>
 #include <signal.h>
@@ -1447,6 +1448,48 @@ static void abrt_handler( int signal, siginfo_t *siginfo, void *_sigcontext )
 }
 
 
+/***********************************************************************
+ *           is_inside_unix_call
+ *
+ * Check whether a signal interrupted the code a unix call called, outside the
+ * dispatchers and outside an msync wait, which abort_thread() ends. That code
+ * may hold locks of host libraries, which the thread-local destructors
+ * pthread_exit() runs or other threads then wait for.
+ */
+static BOOL is_inside_unix_call( struct thread_data *data, const ucontext_t *sigcontext )
+{
+    extern const ULONG_PTR __wine_syscall_dispatcher_user_stack;
+    extern const ULONG_PTR __wine_unix_call_dispatcher_user_stack;
+    ULONG_PTR pc = PC_sig(sigcontext);
+    struct syscall_frame *frame;
+
+    if (!data->teb || data->msync_wait || !is_inside_syscall( data, SP_sig(sigcontext) )) return FALSE;
+    if ((ULONG_PTR)__wine_syscall_dispatcher <= pc && pc < __wine_syscall_dispatcher_user_stack) return FALSE;
+    if ((ULONG_PTR)__wine_unix_call_dispatcher <= pc && pc < __wine_unix_call_dispatcher_user_stack) return FALSE;
+    frame = get_syscall_frame( data );
+    /* the unix call dispatcher saves its return address as both, the syscall
+     * dispatcher saves the caller's lr from x9 */
+    return frame->lr == frame->pc;
+}
+
+
+/***********************************************************************
+ *           end_at_unix_call_return
+ *
+ * Leave the end of a thread that abort_thread() counted as killed to the
+ * return of the unix call it was killed in, where it has left the host code
+ * and holds none of its locks. RESTORE_FLAGS_EMULATION takes that return
+ * through syscall_dispatcher_return_slowpath() to usr2_handler(), which ends
+ * the thread, so the fast paths of the dispatchers stay as they are.
+ */
+static void end_at_unix_call_return( struct thread_data *data, int saved_errno )
+{
+    data->abort_jmp = NULL;
+    get_syscall_frame( data )->restore_flags |= RESTORE_FLAGS_EMULATION;
+    errno = saved_errno;
+}
+
+
 /**********************************************************************
  *		quit_handler
  *
@@ -1462,6 +1505,19 @@ static void quit_handler( int signal, siginfo_t *siginfo, void *_sigcontext )
     if (!data)
     {
         crash_without_teb( signal, siginfo, sigcontext );
+        return;
+    }
+    if (is_inside_unix_call( data, sigcontext ))
+    {
+        int saved_errno = errno;
+        jmp_buf jmp;
+
+        if (!setjmp( jmp ))
+        {
+            data->abort_jmp = jmp;
+            abort_thread( 0 );
+        }
+        end_at_unix_call_return( data, saved_errno );
         return;
     }
     if (is_inside_syscall( data, SP_sig(sigcontext) )) abort_thread(0);
@@ -1524,6 +1580,8 @@ static void usr1_handler( int signal, siginfo_t *siginfo, void *_sigcontext )
         PC_sig(sigcontext) < __wine_unix_call_dispatcher_kernel_stack_ptr)
     {
         save_syscall_entry_frame( sigcontext );
+        /* the unix call dispatcher saves x30 as lr too, see is_inside_unix_call() */
+        get_syscall_frame( data )->lr = LR_sig(sigcontext);
         PC_sig(sigcontext) = __wine_unix_call_dispatcher_kernel_stack_ptr;
     }
     else if (PC_sig(sigcontext) == __wine_syscall_dispatcher_user_stack ||
@@ -1554,9 +1612,24 @@ static void usr1_handler( int signal, siginfo_t *siginfo, void *_sigcontext )
     }
     else if (is_inside_syscall( data, SP_sig(sigcontext) ))
     {
+        BOOL unix_call = is_inside_unix_call( data, sigcontext );
+        int saved_errno = errno;
+        jmp_buf jmp;
+
         context.ContextFlags = CONTEXT_FULL | CONTEXT_ARM64_X18 | CONTEXT_EXCEPTION_REQUEST;
         NtGetContextThread( GetCurrentThread(), &context );
+        if (unix_call)
+        {
+            /* a thread killed while it is suspended here */
+            if (setjmp( jmp ))
+            {
+                end_at_unix_call_return( data, saved_errno );
+                return;
+            }
+            data->abort_jmp = jmp;
+        }
         wait_suspend( &context );
+        data->abort_jmp = NULL;
         NtSetContextThread( GetCurrentThread(), &context );
     }
     else
@@ -1583,6 +1656,8 @@ static void usr2_handler( int signal, siginfo_t *siginfo, void *_sigcontext )
 
     if (!is_inside_syscall( data, SP_sig(sigcontext) )) return;
     if (!frame) return;
+    /* the return of the unix call the thread was killed in */
+    if (data->aborted) abort_thread( 0 );
 
     if (is_emulated_code( frame->pc ))
     {

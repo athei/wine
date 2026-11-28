@@ -130,6 +130,8 @@ struct thread_data
     ULONG_PTR    breakpoint_pc;     /* instruction pointer of an x64 breakpoint backed up for the handlers */
     BOOL         fd_cache_locked;   /* the thread holds fd_cache_mutex */
     const struct msync_wait *msync_wait; /* wait the thread has registered with the msync server */
+    void        *abort_jmp;         /* setjmp buffer abort_thread() returns to instead of ending the thread */
+    BOOL         aborted;           /* the thread was killed and ends when its unix call returns */
     char         debug_info[0x800]; /* debug_info structure */
     char         signal_stack[];    /* signal stack */
     /* char kernel_stack[] */

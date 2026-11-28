@@ -1507,6 +1507,8 @@ void abort_thread( int status )
     struct thread_data *data = get_thread_data();
 
     pthread_sigmask( SIG_BLOCK, &server_block_set, NULL );
+    /* counted when it was killed inside a unix call */
+    if (data->aborted) pthread_exit_wrapper( status );
     /* also for the last thread: other processes may share the objects */
     msync_abort_thread( data );
     if (InterlockedDecrement( &nb_threads ) <= 0) abort_process( status );
@@ -1521,6 +1523,11 @@ void abort_thread( int status )
     {
         if (data->fd_cache_locked) mutex_unlock( &fd_cache_mutex );
         virtual_abort_thread();
+    }
+    if (data->abort_jmp)
+    {
+        data->aborted = TRUE;
+        longjmp( data->abort_jmp, 1 );
     }
     pthread_exit_wrapper( status );
 }
