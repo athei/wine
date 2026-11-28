@@ -685,15 +685,23 @@ BOOL macdrv_ClipCursor(const RECT *clip, BOOL reset)
  */
 BOOL macdrv_GetCursorPos(LPPOINT pos)
 {
-    CGPoint pt;
+    CGPoint pt, warped;
     BOOL ret;
 
     ret = macdrv_get_cursor_position(&pt);
     if (ret)
     {
         TRACE("pointer at (%g,%g) server pos %d,%d\n", pt.x, pt.y, pos->x, pos->y);
-        pos->x = floor(pt.x);
-        pos->y = floor(pt.y);
+
+        /* A warp puts the cursor on a whole point, so in retina mode it lands on
+           an even pixel: SetCursorPos(99, 99) leaves it at pixel 98.  While the
+           cursor is on the point that a warp to the server's position lands on,
+           keep the server's position. */
+        warped = cgpoint_mac_from_win(CGPointMake(pos->x, pos->y));
+        warped = cgpoint_win_from_mac(CGPointMake(floor(warped.x), floor(warped.y)));
+        if (pt.x != warped.x) pos->x = floor(pt.x);
+        if (pt.y != warped.y) pos->y = floor(pt.y);
+        TRACE("returning %d,%d\n", pos->x, pos->y);
     }
     return ret;
 }
