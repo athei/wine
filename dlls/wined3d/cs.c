@@ -3371,7 +3371,7 @@ static const struct wined3d_device_context_ops wined3d_cs_st_ops =
 static BOOL wined3d_cs_queue_is_empty(const struct wined3d_cs *cs, const struct wined3d_cs_queue *queue)
 {
     wined3d_from_cs(cs);
-    return *(volatile ULONG *)&queue->head == queue->tail;
+    return (ULONG)ReadAcquire((const LONG *)&queue->head) == queue->tail;
 }
 
 static void wined3d_cs_queue_submit(struct wined3d_cs_queue *queue, struct wined3d_cs *cs)
@@ -3484,7 +3484,7 @@ static void wined3d_cs_mt_finish(struct wined3d_device_context *context, enum wi
         return wined3d_cs_st_finish(context, queue_id);
 
     TRACE_(d3d_perf)("Waiting for queue %u to be empty.\n", queue_id);
-    while (cs->queue[queue_id].head != *(volatile ULONG *)&cs->queue[queue_id].tail)
+    while (cs->queue[queue_id].head != (ULONG)ReadAcquire((const LONG *)&cs->queue[queue_id].tail))
         wined3d_pause(&spin_count);
     TRACE_(d3d_perf)("Queue is now empty.\n");
 }
@@ -3667,8 +3667,8 @@ static DWORD WINAPI wined3d_cs_run(void *ctx)
         run = wined3d_cs_execute_next(cs, queue);
     }
 
-    cs->queue[WINED3D_CS_QUEUE_MAP].tail = cs->queue[WINED3D_CS_QUEUE_MAP].head;
-    cs->queue[WINED3D_CS_QUEUE_DEFAULT].tail = cs->queue[WINED3D_CS_QUEUE_DEFAULT].head;
+    WriteRelease((LONG *)&cs->queue[WINED3D_CS_QUEUE_MAP].tail, cs->queue[WINED3D_CS_QUEUE_MAP].head);
+    WriteRelease((LONG *)&cs->queue[WINED3D_CS_QUEUE_DEFAULT].tail, cs->queue[WINED3D_CS_QUEUE_DEFAULT].head);
     TRACE("Stopped.\n");
     FreeLibraryAndExitThread(wined3d_module, 0);
 }

@@ -3902,7 +3902,7 @@ static inline void wined3d_resource_wait_idle(const struct wined3d_resource *res
 
     for (;;)
     {
-        tail = *(volatile ULONG *)&cs->queue[WINED3D_CS_QUEUE_DEFAULT].tail;
+        tail = ReadAcquire((const LONG *)&cs->queue[WINED3D_CS_QUEUE_DEFAULT].tail);
         if (head == tail) /* Queue empty. */
             break;
 

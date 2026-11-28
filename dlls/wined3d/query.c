@@ -467,7 +467,7 @@ HRESULT CDECL wined3d_query_get_data(struct wined3d_query *query,
         return WINED3DERR_INVALIDCALL;
     }
 
-    if (query->counter_main != query->counter_retrieved
+    if (query->counter_main != ReadAcquire(&query->counter_retrieved)
             || (query->buffer_object && !wined3d_query_buffer_is_valid(query)))
     {
         if (flags & WINED3DGETDATA_FLUSH && !query->device->cs->queries_flushed)
